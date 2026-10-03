@@ -976,9 +976,24 @@ function bindBrowserSign(){
     const qty=+$('bq').value||1;
     const fee=await rpc.getFeeData();
     const gasPrice=fee.gasPrice||1n;
-    // a mint is ~125k gas; 3x covers price moves and a second attempt
-    const perMint=125000n*gasPrice*3n;
     const price=BigInt(D.publicDrop?D.publicDrop.price:0)*BigInt(qty);
+
+    // Ask the chain what this mint actually costs. Before a stage opens the
+    // call reverts with "not active" and no estimate is possible -- which is
+    // exactly when funding matters -- so fall back to a measured curve:
+    // ~118k base plus ~2k per token, from mints on this contract family.
+    let gasUnits, how;
+    try{
+      const sd=new ethers.Contract(SEADROP_ADDR,SEADROP_ABI,rpc);
+      const data=(await sd.mintPublic.populateTransaction(
+        C.contract,FEE_ADDR,ethers.ZeroAddress,qty,{value:price})).data;
+      gasUnits=await rpc.estimateGas({to:SEADROP_ADDR,data,value:price,
+                                      from:WALLETS[0].address});
+      gasUnits=gasUnits*3n/2n; how='estimated on chain, +50%';
+    }catch(e){
+      gasUnits=(118000n+2000n*BigInt(qty))*2n; how='stage not open — measured estimate, doubled';
+    }
+    const perMint=gasUnits*gasPrice;
     const need=perMint+price;
     const rows=[]; let total=0n;
     for(const x of WALLETS){
@@ -1003,9 +1018,10 @@ function bindBrowserSign(){
         <button class="f fire" id="fsend" ${total===0n||!enough?'disabled':''}
           style="margin-left:auto">${total===0n?'all funded':'Send gas'}</button>
       </div>
-      <div class="note">Each wallet is topped up to roughly three times what one mint
-        costs, plus the mint price if the drop is not free. Already-funded wallets are
-        skipped.</div>`);
+      <div class="note">Per wallet: <b>${gasUnits.toString()}</b> gas units
+        (${esc(how)}) × <b>${(Number(gasPrice)/1e9).toFixed(3)}</b> gwei
+        = ${E(perMint)} ETH${price>0n?` plus ${E(price)} for ${qty} at the mint price`:''}
+        — <b>${E(need)} ETH</b> each. Wallets already holding that much are skipped.</div>`);
     if($('fsend')) $('fsend').onclick=()=>sendFunding(rows.filter(r=>r.short>0n));
   }
 
