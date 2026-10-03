@@ -181,6 +181,7 @@ h1 .mark{width:38px;height:38px;color:var(--acc);flex:none;transition:width .45s
   padding:6px 0;border-top:1px solid #15181d;font-size:12px}
 .rj:first-of-type{border-top:0}
 .rj .st{font-weight:600}
+.warn{color:var(--warn)}
 .st.scheduled{color:var(--warn)}.st.firing{color:var(--acc)}
 .st.done{color:var(--ok)}.st.failed,.st.cancelled{color:var(--bad)}
 .rj a{color:#6b727c;text-decoration:none}.rj a:hover{color:var(--bad)}
@@ -789,6 +790,7 @@ async function run(push=true, force=false){
       <span class="muted" style="font-size:12px">each</span>
       <label class="muted" style="font-size:12px">
         <input type="checkbox" id="atstart" style="width:auto"> wait for stage open</label>
+      <span id="schedhint" class="muted" style="font-size:11.5px"></span>
       <button class="f fire" id="bsend">Mint</button>
     </div>
     <div id="bsout" style="margin-top:11px"></div>
@@ -873,6 +875,14 @@ async function renderWallets(){
   if(!WALLETS.length){ host.innerHTML=''; $('mintrow').classList.add('hidden'); return; }
   $('mintrow').classList.remove('hidden');
   const exts=WALLETS.filter(x=>x.source!=='key').length;
+  const hint=$('schedhint');
+  if(hint){
+    const k=WALLETS.filter(x=>x.source==='key').length;
+    hint.innerHTML = !WALLETS.length ? ''
+      : k===WALLETS.length ? `<span class="ok">all ${k} can be scheduled</span>`
+      : k ? `<span class="warn">only ${k} of ${WALLETS.length} can be scheduled</span>`
+          : `<span class="err">none can be scheduled — extension wallets only mint live</span>`;
+  }
   const warn = exts===WALLETS.length && WALLETS.length>1
     ? `<div class="note err" style="margin-bottom:9px">All ${WALLETS.length} are extension
          wallets, so each will prompt MetaMask separately and broadcast at its own RPC —
@@ -989,12 +999,23 @@ function bindBrowserSign(){
     const fee=await rpc.getFeeData();
     const items=[], failed=[], viaExt=[];
     const locals=WALLETS.filter(x=>x.source==='key');
-    const exts=WALLETS.filter(x=>x.source!=='key');
+    const atWanted=$('atstart').checked&&D.publicDrop&&D.publicDrop.start>Date.now()/1000;
+    // An extension cannot be scheduled: MetaMask will not hand back a signed
+    // transaction to hold, only sign-and-broadcast now. Firing these early
+    // would revert with "stage not active" and burn gas on every one, so they
+    // are skipped rather than sent.
+    const exts=atWanted?[]:WALLETS.filter(x=>x.source!=='key');
+    const deferred=atWanted?WALLETS.filter(x=>x.source!=='key').length:0;
 
-    // Extension wallets cannot hand back raw signed bytes -- MetaMask dropped
-    // eth_signTransaction and will only sign-and-broadcast itself. Those go
-    // through the extension, one confirmation each, at the extension's own
-    // RPC speed. Only locally held keys can be signed here and relayed.
+    if(deferred && !locals.length){
+      out(`<div class="verdict n">cannot schedule extension wallets</div>
+        <div class="note">MetaMask only signs and broadcasts in one step — there is no
+          signed transaction to hold until the stage opens, so these ${deferred} cannot be
+          armed. Either untick <b>wait for stage open</b> and mint manually when it opens,
+          or add the wallets by private key, which can be signed here and scheduled.</div>`);
+      return;
+    }
+
     for(const x of exts){
       try{
         const sd=new ethers.Contract(SEADROP_ADDR,SEADROP_ABI,x.signer);
@@ -1059,6 +1080,8 @@ function bindBrowserSign(){
           :esc((x.error||'failed').slice(0,46))}</td></tr>`).join('')}</table>
       ${viaExt.length?`<div class="note">${viaExt.length} also sent via your extension
         (not relayed — extensions broadcast themselves).</div>`:''}
+      ${deferred?`<div class="note err">${deferred} extension wallet${deferred===1?'':'s'}
+        skipped: those cannot be scheduled.</div>`:''}
       ${failed.length?`<div class="note err">${failed.length} could not be signed: ${
         esc((failed[0]||{}).why||'')}</div>`:''}
       <div class="note">Relayed via <span class="mono">${esc(r.target||'')}</span>.
