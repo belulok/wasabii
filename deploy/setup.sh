@@ -93,28 +93,19 @@ systemctl daemon-reload
 systemctl enable --now wasabi
 
 echo "==> nginx"
-cat > /etc/nginx/sites-available/wasabi <<NGINX
+# Written in full for each case rather than edited afterwards: slicing the TLS
+# block out with sed left an unclosed server{} and nginx refused to start.
+HAVE_DNS=0; getent hosts "$DOMAIN" >/dev/null && HAVE_DNS=1
+
+write_http_only() {
+  cat > /etc/nginx/sites-available/wasabi <<NGINX
 server {
     listen 80;
-    server_name $DOMAIN;
-    location / { return 301 https://\$host\$request_uri; }
-}
-server {
-    listen 443 ssl http2;
-    server_name $DOMAIN;
-
-    # filled in by certbot
-    ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
-
-    add_header Strict-Transport-Security "max-age=31536000" always;
+    server_name $DOMAIN www.$DOMAIN;
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
-
-    # the app signs transactions, so keep the blast radius small
     limit_req zone=wasabi burst=20 nodelay;
     client_max_body_size 1m;
-
     location / {
         proxy_pass http://127.0.0.1:8899;
         proxy_set_header Host \$host;
@@ -123,26 +114,27 @@ server {
     }
 }
 NGINX
+}
+
 grep -q 'limit_req_zone.*wasabi' /etc/nginx/nginx.conf || \
   sed -i '/http {/a \    limit_req_zone $binary_remote_addr zone=wasabi:10m rate=10r/s;' /etc/nginx/nginx.conf
 ln -sf /etc/nginx/sites-available/wasabi /etc/nginx/sites-enabled/wasabi
 rm -f /etc/nginx/sites-enabled/default
 
+# Start on port 80 either way; certbot rewrites this file itself when it runs,
+# adding the TLS server block and the redirect.
+write_http_only
+nginx -t && systemctl reload nginx
+
 echo "==> certificate"
-if [ "$SKIP_TLS" = "1" ] && ! getent hosts "$DOMAIN" >/dev/null; then
-  # nginx will not start with ssl_certificate paths that do not exist yet
-  sed -i '/listen 443 ssl/,$d' /etc/nginx/sites-available/wasabi
-  printf '%s\n' 'server { listen 443 ssl http2; server_name '"$DOMAIN"'; return 503; }' \
-    > /dev/null   # placeholder intentionally omitted; port 80 only until certbot runs
-  sed -i 's#location / { return 301 https://\$host\$request_uri; }#location / { proxy_pass http://127.0.0.1:8899; proxy_set_header Host $host; }#' \
-    /etc/nginx/sites-available/wasabi
-  echo "    deferred — re-run this script without SKIP_TLS once DNS resolves"
+if [ "$SKIP_TLS" = "1" ] && [ "$HAVE_DNS" = "0" ]; then
+  echo "    deferred — re-run without SKIP_TLS once DNS resolves"
 else
   certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN" --non-interactive --agree-tos \
     -m "$EMAIL" --redirect || \
   certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect
+  nginx -t && systemctl reload nginx
 fi
-nginx -t && systemctl reload nginx
 
 echo "==> firewall"
 ufw allow OpenSSH >/dev/null; ufw allow 'Nginx Full' >/dev/null
