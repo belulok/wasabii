@@ -21,3 +21,6 @@ users.json
 
 # Saved runs (signed transactions, no keys)
 jobs.json
+
+# Session signing secret
+.session_secret

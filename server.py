@@ -43,7 +43,7 @@ WALLET_ROOTS = []
 # screenshots) and because entry is restricted to an allowlist. Open signup
 # would mean custodying other people's keys on an internet-facing host.
 USERS_FILE = os.path.join(HERE, 'users.json')
-SESSION_TTL = int(os.environ.get('SESSION_TTL', 60 * 60 * 12))
+SESSION_TTL = int(os.environ.get('SESSION_TTL', 60 * 60 * 24 * 30))
 ALLOWED = {e.strip().lower() for e in
            os.environ.get('WASABI_ALLOWED_EMAILS', '').split(',') if e.strip()}
 # With OPEN_SIGNUP anyone may create an account, because accounts no longer
@@ -55,9 +55,45 @@ OWNERS = {e.strip().lower() for e in
 GOOGLE_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
 GOOGLE_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
 PUBLIC_URL = os.environ.get('PUBLIC_URL', '').rstrip('/')
-_sessions = {}          # sid -> {email, exp}
 _oauth_states = {}      # state -> exp
 _authlock = threading.Lock()
+
+# Sessions were held in memory, so every restart signed everyone out -- and a
+# server that is deployed often restarts often. They are signed cookies now:
+# the cookie carries the email and an expiry with an HMAC over both, so the
+# server keeps no session state and a restart changes nothing. The secret is
+# persisted; losing it is the only thing that invalidates sessions.
+SECRET_FILE = os.path.join(HERE, '.session_secret')
+
+
+def _secret():
+    env = os.environ.get('WASABI_SECRET')
+    if env:
+        return env.encode()
+    try:
+        return open(SECRET_FILE, 'rb').read().strip()
+    except Exception:
+        pass
+    sec = secrets.token_urlsafe(48).encode()
+    old = os.umask(0o077)
+    try:
+        open(SECRET_FILE, 'wb').write(sec)
+    except Exception:
+        pass
+    finally:
+        os.umask(old)
+    return sec
+
+
+SECRET = _secret()
+
+
+def _b64(b):
+    return base64.urlsafe_b64encode(b).decode().rstrip('=')
+
+
+def _unb64(t):
+    return base64.urlsafe_b64decode(t + '=' * (-len(t) % 4))
 
 
 def _users():
@@ -120,20 +156,24 @@ def email_allowed(email):
 
 
 def new_session(email):
-    with _authlock:
-        for sid, v in list(_sessions.items()):     # drop expired
-            if v['exp'] < time.time():
-                _sessions.pop(sid, None)
-        sid = secrets.token_urlsafe(32)
-        _sessions[sid] = {'email': email, 'exp': time.time() + SESSION_TTL}
-    return sid
+    exp = int(time.time() + SESSION_TTL)
+    body = _b64(f'{email}|{exp}'.encode())
+    sig = _b64(hmac.new(SECRET, body.encode(), hashlib.sha256).digest())
+    return f'{body}.{sig}'
 
 
-def session_email(sid):
-    v = _sessions.get(sid or '')
-    if not v or v['exp'] < time.time():
+def session_email(cookie):
+    try:
+        body, sig = (cookie or '').split('.', 1)
+        want = _b64(hmac.new(SECRET, body.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, want):
+            return None
+        email, exp = _unb64(body).decode().rsplit('|', 1)
+        if int(exp) < time.time():
+            return None
+        return email
+    except Exception:
         return None
-    return v['email']
 
 
 def google_auth_url(state, redirect_uri):
@@ -1278,6 +1318,10 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(b)))
         self.end_headers(); self.wfile.write(b)
 
+    def _cookie_hdr(self, sid):
+        secure = ' Secure;' if self.headers.get('X-Forwarded-Proto') == 'https' else ''
+        return f'wsid={sid}; Path=/; Max-Age={SESSION_TTL}; HttpOnly;{secure} SameSite=Lax'
+
     def _secure_headers(self):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'DENY')
@@ -1338,8 +1382,13 @@ class H(http.server.BaseHTTPRequestHandler):
                 self.send_header('Cache-Control', 'no-store, must-revalidate')
                 self.send_header('Content-Length', str(len(b)))
                 # remember the token so the page's own fetches authenticate
-                self.send_header('Set-Cookie',
-                                 f'wasabi={TOKEN}; Path=/; HttpOnly; SameSite=Strict')
+                who = self._who()
+                if who:
+                    self.send_header('Set-Cookie', self._cookie_hdr(new_session(who)))
+                else:
+                    self.send_header('Set-Cookie',
+                                     f'wasabi={TOKEN}; Path=/; Max-Age={SESSION_TTL}; '
+                                     f'HttpOnly; SameSite=Strict')
                 self._secure_headers()
                 self.end_headers(); self.wfile.write(b); return
             if u.path == '/api/resolve':
@@ -1401,9 +1450,6 @@ class H(http.server.BaseHTTPRequestHandler):
                                'open': OPEN_SIGNUP,
                                'claimable': not OPEN_SIGNUP and not ALLOWED and not _users()})
         if u.path == '/auth/logout':
-            sid = self._cookie('wsid')
-            with _authlock:
-                _sessions.pop(sid, None)
             self.send_response(302)
             self.send_header('Location', '/')
             self.send_header('Set-Cookie', 'wsid=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
@@ -1439,10 +1485,7 @@ class H(http.server.BaseHTTPRequestHandler):
             sid = new_session(email)
             self.send_response(302)
             self.send_header('Location', '/')
-            self.send_header('Set-Cookie',
-                             f'wsid={sid}; Path=/; HttpOnly; SameSite=Lax; Secure'
-                             if self.headers.get('X-Forwarded-Proto') == 'https'
-                             else f'wsid={sid}; Path=/; HttpOnly; SameSite=Lax')
+            self.send_header('Set-Cookie', self._cookie_hdr(sid))
             self.end_headers(); return
         return self._deny(404, 'not found')
 
@@ -1475,10 +1518,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(b)))
-        self.send_header('Set-Cookie',
-                         f'wsid={sid}; Path=/; HttpOnly; SameSite=Lax; Secure'
-                         if self.headers.get('X-Forwarded-Proto') == 'https'
-                         else f'wsid={sid}; Path=/; HttpOnly; SameSite=Lax')
+        self.send_header('Set-Cookie', self._cookie_hdr(sid))
         self._secure_headers(); self.end_headers(); self.wfile.write(b)
 
     def do_POST(self):
