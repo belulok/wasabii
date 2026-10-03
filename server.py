@@ -1712,6 +1712,25 @@ class H(http.server.BaseHTTPRequestHandler):
             if u.path == '/api/relay/batch':
                 return self._send(relay_many(d.get('items'), d.get('chain'), d.get('at'),
                                              self._who() or 'token', d.get('label')))
+            if u.path == '/api/runs/record':
+                # Extension wallets broadcast through MetaMask and never reach
+                # the relay, so without this their mints leave no trace at all.
+                its = d.get('items') or []
+                if not isinstance(its, list) or not its:
+                    return self._deny(400, 'nothing to record')
+                res = [{'address': (i.get('address') or '')[:42], 'qty': i.get('qty'),
+                        'result': (i.get('hash') or None),
+                        'error': i.get('error')} for i in its[:100]]
+                job = {'id': secrets.token_urlsafe(9), 'owner': self._who() or 'token',
+                       'chain': d.get('chain') or 'robinhood', 'label': d.get('label') or '',
+                       'at': None, 'created': int(time.time()),
+                       'status': 'done', 'count': len(res),
+                       'tokens': sum(int(r.get('qty') or 0) for r in res),
+                       'wallets': [r['address'] for r in res],
+                       'landed': sum(1 for r in res if r.get('result')),
+                       'results': res, 'items': []}
+                job_put(job)
+                return self._send({'jobId': job['id'], 'recorded': len(res)})
             if u.path == '/api/jobs/cancel':
                 cur = db().execute(
                     """UPDATE jobs SET status='cancelled', items='[]'
