@@ -19,9 +19,21 @@ one signed transaction are safe -- same nonce, same hash, so at most one can
 ever land.
 """
 import http.server, socketserver, json, subprocess, urllib.request, urllib.parse
-import ssl, http.client, threading, time, os, re, socket
+import ssl, http.client, threading, time, os, re, socket, secrets, hmac
 
 PORT = int(os.environ.get('PORT', '8899'))
+BIND = os.environ.get('BIND', '127.0.0.1')
+
+# Every endpoint can sign with whatever key material is on this host, so the
+# whole surface is gated. A token is generated on first run if none is set;
+# WASABI_TOKEN overrides it. Loopback-only deployments are still gated, because
+# any page in the browser can reach 127.0.0.1.
+TOKEN = os.environ.get('WASABI_TOKEN') or secrets.token_urlsafe(24)
+
+# Wallet files may only be read from inside these roots. The path parameter
+# previously accepted absolute paths and "..", which on an exposed host is a
+# read primitive aimed at exactly the files that must never leak.
+WALLET_ROOTS = []
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -51,6 +63,27 @@ def load_env():
 
 load_env()
 CACHE = os.path.join(HERE, 'collections.json')
+WALLET_ROOTS.extend([os.path.realpath(os.path.join(HERE, '..', 'wallets')),
+                     os.path.realpath(os.path.join(HERE, 'wallets'))])
+
+
+def safe_wallet_path(path):
+    """Resolve a user-supplied wallet path, or refuse.
+
+    Absolute paths and traversal are rejected outright; what remains must
+    resolve inside WALLET_ROOTS after symlinks, so a symlink planted in the
+    wallets directory cannot reach outside it either.
+    """
+    if not path or not isinstance(path, str):
+        raise ValueError('no wallet file given')
+    if os.path.isabs(path) or '..' in path.replace('\\', '/').split('/'):
+        raise ValueError('wallet path must be relative and inside the wallets directory')
+    for root in WALLET_ROOTS:
+        cand = os.path.realpath(os.path.join(root, os.path.basename(path)))
+        if cand.startswith(root + os.sep) and os.path.isfile(cand):
+            return cand
+    raise ValueError('wallet file not found in ' +
+                     ' or '.join(WALLET_ROOTS) + ' (filename only, no directories)')
 KEYFILE = os.path.join(HERE, 'apikey.json')
 _keylock = threading.Lock()
 
@@ -700,21 +733,8 @@ def burst(rpcurl, raw, at, chain=None, lead=0.4, interval=0.025, window=4.0,
 # throughput, not redundancy.
 
 def read_wallet_file(path):
-    """Addresses and keys from a wallet file. Keys never leave this process.
-
-    A relative path is resolved against the repo root as well as this folder,
-    so "wallets/mine.txt" works regardless of where the server was started.
-    """
-    tried = [path]
-    if not os.path.isabs(path):
-        for base in (os.path.join(HERE, '..'), HERE, os.getcwd()):
-            cand = os.path.normpath(os.path.join(base, path))
-            tried.append(cand)
-            if os.path.isfile(cand):
-                path = cand
-                break
-    if not os.path.isfile(path):
-        raise ValueError('no such file. tried: ' + ', '.join(dict.fromkeys(tried)))
+    """Addresses and keys from a wallet file. Keys never leave this process."""
+    path = safe_wallet_path(path)
     txt = open(path, errors='ignore').read()
     pairs = re.findall(r'(0x[a-fA-F0-9]{40})\s+(0x[a-fA-F0-9]{64})', txt)
     if not pairs:   # "Address : 0x..\nPrivate key : 0x.." layout
@@ -903,18 +923,70 @@ def fire(rpcurl, raw, lanes=8, at=None, chain=None):
 
 
 class H(http.server.BaseHTTPRequestHandler):
+    server_version = 'wasabi'
+    sys_version = ''
+
     def log_message(self, *a): pass
+
+    # -------------------------------------------------- auth / csrf
+    def _token_ok(self):
+        sent = (self.headers.get('X-Wasabi-Token') or '').strip()
+        if not sent:
+            for part in (self.headers.get('Cookie') or '').split(';'):
+                k, _, v = part.strip().partition('=')
+                if k == 'wasabi':
+                    sent = v.strip(); break
+        if not sent:
+            sent = (urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query).get('token') or [''])[0]
+        return bool(sent) and hmac.compare_digest(sent, TOKEN)
+
+    def _origin_ok(self):
+        """Reject cross-site POSTs. A browser always sends Origin on these;
+        curl sends none, which is allowed so the CLI keeps working."""
+        o = self.headers.get('Origin')
+        if not o:
+            return True
+        try:
+            return urllib.parse.urlparse(o).netloc == (self.headers.get('Host') or '')
+        except Exception:
+            return False
+
+    def _deny(self, code, msg):
+        b = json.dumps({'error': msg}).encode()
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(b)))
+        self.end_headers(); self.wfile.write(b)
+
+    def _secure_headers(self):
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Referrer-Policy', 'no-referrer')
 
     def _send(self, obj, code=200):
         b = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(b)))
+        self._secure_headers()
         self.end_headers(); self.wfile.write(b)
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
+        if not self._token_ok():
+            if u.path in ('/', '/index.html'):
+                b = (b'<meta charset=utf-8><body style="background:#0f1114;color:#e8eaed;'
+                     b'font:14px ui-sans-serif;padding:60px;text-align:center">'
+                     b'<h1 style="font-size:16px;letter-spacing:.1em">wasabi</h1>'
+                     b'<p style="color:#8d949f">Open this with the access token the server '
+                     b'printed on startup:<br><code>?token=...</code></p>')
+                self.send_response(401)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(b)))
+                self._secure_headers(); self.end_headers(); self.wfile.write(b); return
+            return self._deny(401, 'unauthorised: supply ?token= or X-Wasabi-Token')
         try:
             if u.path in ('/', '/index.html'):
                 b = open(os.path.join(HERE, 'index.html'), 'rb').read()
@@ -922,6 +994,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Cache-Control', 'no-store, must-revalidate')
                 self.send_header('Content-Length', str(len(b)))
+                # remember the token so the page's own fetches authenticate
+                self.send_header('Set-Cookie',
+                                 f'wasabi={TOKEN}; Path=/; HttpOnly; SameSite=Strict')
+                self._secure_headers()
                 self.end_headers(); self.wfile.write(b); return
             if u.path == '/api/resolve':
                 return self._send(resolve(q['url'][0]))
@@ -966,6 +1042,10 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({'error': f'{type(e).__name__}: {e}'}, 500)
 
     def do_POST(self):
+        if not self._token_ok():
+            return self._deny(401, 'unauthorised')
+        if not self._origin_ok():
+            return self._deny(403, 'cross-site request refused')
         n = int(self.headers.get('Content-Length', 0))
         d = json.loads(self.rfile.read(n) or b'{}')
         u = urllib.parse.urlparse(self.path)
@@ -998,5 +1078,10 @@ class S(socketserver.ThreadingTCPServer):
 if __name__ == '__main__':
     k = os.environ.get('OPENSEA_API_KEY')
     print(f'opensea key   :  {"from .env (" + str(len(k)) + " chars)" if k else "auto-minted"}')
-    print(f'mint console  ->  http://127.0.0.1:{PORT}/')
-    S(('127.0.0.1', PORT), H).serve_forever()
+    print(f'wallet roots  :  {", ".join(WALLET_ROOTS)}')
+    if not os.environ.get('WASABI_TOKEN'):
+        print('access token  :  generated for this run (set WASABI_TOKEN to pin it)')
+    print()
+    print(f'  http://{BIND}:{PORT}/?token={TOKEN}')
+    print()
+    S((BIND, PORT), H).serve_forever()
