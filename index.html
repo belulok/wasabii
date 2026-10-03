@@ -506,6 +506,11 @@ async function run(push=true){
       <button class="f" id="wKey">Add by private key</button>
       <span class="muted" style="font-size:12px">add the wallets you want to mint with</span>
     </div>
+    <div class="note" style="margin-top:7px">
+      An extension signs and broadcasts on its own — one confirmation per wallet, at its
+      own RPC speed. Pasted keys are signed here and relayed from <b>~19ms</b> away,
+      with no prompts, which is what makes several wallets practical.
+    </div>
     <div id="wkeybox" class="hidden" style="margin-top:9px">
       <textarea id="pk" class="f" spellcheck="false" autocomplete="off"
         style="width:100%;min-height:68px;font-family:var(--mono);font-size:11.5px"
@@ -601,7 +606,7 @@ async function renderWallets(){
   host.innerHTML=`<table class="st" style="max-width:760px">
     <tr><th>wallet</th><th>added via</th><th>gas</th><th>minted</th><th>can take</th><th></th></tr>
     ${WALLETS.map((x,i)=>`<tr id="wr${i}"><td class="mono">${esc(x.address.slice(0,16))}…</td>
-      <td class="muted">${esc(x.source)}</td>
+      <td class="muted">${x.source==='key'?'key · relayed':'extension · own broadcast'}</td>
       <td colspan="3" class="muted">checking…</td>
       <td><a href="#" data-rm="${i}" class="muted" style="text-decoration:none">remove</a></td></tr>`).join('')}
   </table>`;
@@ -619,7 +624,8 @@ async function renderWallets(){
       const row=$('wr'+i); if(!row) continue;
       const gas=Number(ethers.formatEther(bal));
       row.innerHTML=`<td class="mono">${esc(x.address.slice(0,16))}…</td>
-        <td class="muted">${esc(x.source)}</td>
+        <td class="muted">${x.source==='key'?'<span class="ok">key · relayed</span>'
+                             :'extension · own broadcast'}</td>
         <td class="${gas>0?'ok':'err'}">${gas.toFixed(6)}</td>
         <td>${e.minted??'—'}</td>
         <td class="${e.maxNow?'ok':'err'}"><b>${e.maxNow??0}</b></td>
@@ -671,9 +677,25 @@ function bindBrowserSign(){
     const rpc=new ethers.JsonRpcProvider(D.rpc);
     const price=BigInt(D.publicDrop?D.publicDrop.price:0)*BigInt(qty);
     const fee=await rpc.getFeeData();
-    const items=[], failed=[];
-    out(`<span class="muted">signing ${WALLETS.length} in this tab…</span>`);
-    for(const x of WALLETS){
+    const items=[], failed=[], viaExt=[];
+    const locals=WALLETS.filter(x=>x.source==='key');
+    const exts=WALLETS.filter(x=>x.source!=='key');
+
+    // Extension wallets cannot hand back raw signed bytes -- MetaMask dropped
+    // eth_signTransaction and will only sign-and-broadcast itself. Those go
+    // through the extension, one confirmation each, at the extension's own
+    // RPC speed. Only locally held keys can be signed here and relayed.
+    for(const x of exts){
+      try{
+        const sd=new ethers.Contract(SEADROP_ADDR,SEADROP_ABI,x.signer);
+        const sent=await sd.mintPublic(C.contract,FEE_ADDR,ethers.ZeroAddress,qty,
+                                       {value:price, gasLimit:400000n});
+        viaExt.push({address:x.address, hash:sent.hash});
+      }catch(e){ failed.push({a:x.address, why:(e.shortMessage||e.message||String(e))}); }
+    }
+
+    if(locals.length) out(`<span class="muted">signing ${locals.length} in this tab…</span>`);
+    for(const x of locals){
       try{
         const sd=new ethers.Contract(SEADROP_ADDR,SEADROP_ABI,x.signer);
         const tx=await sd.mintPublic.populateTransaction(
@@ -686,7 +708,13 @@ function bindBrowserSign(){
       }catch(e){ failed.push({a:x.address, why:(e.shortMessage||e.message||String(e))}); }
     }
     if(!items.length){
-      out(`<span class="err">nothing could be signed — ${esc((failed[0]||{}).why||'')}</span>`); return }
+      out(`${viaExt.length?`<div class="verdict y">${viaExt.length} sent via your extension</div>
+        <table class="st" style="max-width:760px">${viaExt.map(v=>
+          `<tr><td class="mono">${esc(v.address.slice(0,16))}…</td>
+           <td class="ok mono">${esc(v.hash.slice(0,20))}…</td></tr>`).join('')}</table>
+        <div class="note">Sent through the extension, so these did not use the relay.</div>`:''}
+        ${failed.length?`<div class="note err">${esc((failed[0]||{}).why||'')}</div>`:''}`);
+      renderWallets(); return }
     const at=$('atstart').checked&&D.publicDrop?D.publicDrop.start:null;
     out(`<span class="ok">${items.length} signed</span> <span class="muted">· ${
       at?'waiting for the stage to open':'relaying'}…</span>`);
@@ -699,7 +727,10 @@ function bindBrowserSign(){
         <td>${x.qty??''}</td><td>${x.ms??'—'}</td>
         <td class="${x.result?'ok':'err'}">${x.result?esc(x.result.slice(0,20))+'…'
           :esc((x.error||'failed').slice(0,46))}</td></tr>`).join('')}</table>
-      ${failed.length?`<div class="note err">${failed.length} could not be signed</div>`:''}
+      ${viaExt.length?`<div class="note">${viaExt.length} also sent via your extension
+        (not relayed — extensions broadcast themselves).</div>`:''}
+      ${failed.length?`<div class="note err">${failed.length} could not be signed: ${
+        esc((failed[0]||{}).why||'')}</div>`:''}
       <div class="note">Relayed via <span class="mono">${esc(r.target||'')}</span>.
         Your keys never left this tab.</div>`);
   };
