@@ -343,8 +343,9 @@ async function loadRuns(){
       <span class="muted">${esc(x.label||x.chain)} · ${x.count} wallet${x.count===1?'':'s'}
         · ${x.tokens} token${x.tokens===1?'':'s'}${
         x.status==='done'?` · <span class="ok">${x.landed} landed</span>`:''}</span>
-      <span class="muted">${x.at?(x.status==='scheduled'?until(x.at):'armed '+ago(x.created))
-                              :ago(x.created)}</span>
+      <span class="muted">${x.status==='scheduled'?until(x.at)
+        :(x.lateBy>5?`<span class="st failed">${Math.round(x.lateBy)}s late</span>`
+                    :ago(x.finished||x.created))}</span>
       <span>${x.status==='scheduled'
         ? `<a href="#" data-cancel="${esc(x.id)}">cancel</a>` : ''}</span>
     </div>`).join('')}`;

@@ -959,6 +959,7 @@ def _run_job(jid):
             return
         j['status'] = 'firing'
         _jobs_save(d)
+    fired = time.time()
     try:
         rpcurl, _ = CHAINS[j['chain']]
         out = batch_fire(rpcurl, j['items'], None, j['chain'])
@@ -966,12 +967,19 @@ def _run_job(jid):
         status, landed = 'done', out['landed']
     except Exception as e:
         res, status, landed = [{'error': str(e)[:160]}], 'failed', 0
+    # A deadline that passed while the process was down still fires, because
+    # supply often remains -- but silently calling that 'done' hides the one
+    # fact that decides whether it was any use.
+    late = max(0.0, fired - (j.get('at') or fired)) if j.get('at') else 0.0
     with _joblock:
         d = _jobs_load()
         if jid in d:
             d[jid].update(status=status, landed=landed, results=res,
-                          finished=int(time.time()))
+                          finished=int(time.time()), firedAt=fired,
+                          lateBy=round(late, 2))
+            d[jid]['items'] = []          # signed bytes are spent; drop them
             _jobs_save(d)
+    _jobs_cache['mtime'] = -1
 
 
 _jobs_cache = {'mtime': -1, 'data': {}}
