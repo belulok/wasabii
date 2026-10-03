@@ -797,8 +797,9 @@ async function run(push=true, force=false){
       <div class="lbl" style="margin-bottom:9px">top up gas
         <i>— send from one wallet to the ones above</i></div>
       <div class="row">
-        <button class="f" id="fConnect">Use connected wallet</button>
+        <button class="f" id="fConnect">Choose from wallet</button>
         <button class="f" id="fKey">Use a private key</button>
+        <select class="f hidden" id="fpick"></select>
         <span class="muted" style="font-size:12px" id="fwho">no funding wallet chosen</span>
       </div>
       <div id="fkeybox" class="hidden" style="margin-top:9px">
@@ -1038,6 +1039,7 @@ function bindBrowserSign(){
     const need=perMint+price;
     const rows=[]; let total=0n;
     for(const x of WALLETS){
+      if(FUNDER && x.address.toLowerCase()===FUNDER.address.toLowerCase()) continue;
       const bal=await rpc.getBalance(x.address);
       const short=bal>=need?0n:need-bal;
       if(short>0n) total+=short;
@@ -1103,15 +1105,40 @@ function bindBrowserSign(){
   window.__planFunding=planFunding;   // so the panel renders on first paint
   planFunding();
 
+  // The funder must be pickable: getSigner() returns whichever account
+  // MetaMask happens to have selected, which is normally one of the wallets
+  // being funded -- a wallet cannot top itself up.
   $('fConnect').onclick=async()=>{
     if(!window.ethereum){fout('<span class="err">no wallet extension found</span>');return}
-    const prov=new ethers.BrowserProvider(window.ethereum);
-    await prov.send('eth_requestAccounts',[]);
-    const signer=await prov.getSigner();
-    FUNDER={address:await signer.getAddress(), signer, source:'extension'};
-    $('fwho').innerHTML=`funding from <span class="mono">${esc(FUNDER.address.slice(0,16))}…</span>
-      <span class="muted">(extension — one confirmation per transfer)</span>`;
-    planFunding();
+    try{
+      try{ await window.ethereum.request({method:'wallet_requestPermissions',
+                                          params:[{eth_accounts:{}}]}); }
+      catch(e){ /* dismissed: use what is already permitted */ }
+      const prov=new ethers.BrowserProvider(window.ethereum);
+      const accounts=await prov.send('eth_requestAccounts',[]);
+      if(!accounts.length){fout('<span class="err">no accounts permitted</span>');return}
+      const rpc=new ethers.JsonRpcProvider(D.rpc);
+      const bals=await Promise.all(accounts.map(a=>rpc.getBalance(a).catch(()=>0n)));
+      const inList=new Set(WALLETS.map(w=>w.address.toLowerCase()));
+      const opts=accounts.map((a,i)=>({a,b:bals[i],used:inList.has(a.toLowerCase())}))
+                         .sort((x,y)=>(y.b>x.b?1:y.b<x.b?-1:0));
+      $('fpick').classList.remove('hidden');
+      $('fpick').innerHTML=opts.map(o=>
+        `<option value="${esc(o.a)}">${esc(o.a.slice(0,10))}… · ${
+          Number(ethers.formatEther(o.b)).toFixed(6)} ETH${o.used?' · being funded':''}</option>`).join('');
+      const choose=async()=>{
+        const addr=$('fpick').value;
+        FUNDER={address:addr, signer:await prov.getSigner(addr), source:'extension'};
+        const clash=inList.has(addr.toLowerCase());
+        $('fwho').innerHTML=`funding from <span class="mono">${esc(addr.slice(0,14))}…</span>`+
+          `<span class="muted"> (extension — one confirmation per transfer)</span>`+
+          (clash?`<div class="note err">That wallet is also in the list above, so it would
+             be sending gas to itself. Pick a different one.</div>`:'');
+        planFunding();
+      };
+      $('fpick').onchange=choose;
+      await choose();            // default to the richest account
+    }catch(e){ fout(`<span class="err">${esc(e.shortMessage||e.message||e)}</span>`) }
   };
   $('fKey').onclick=()=>{ $('fkeybox').classList.toggle('hidden'); $('fpk').focus(); };
   $('fpkAdd').onclick=()=>{
