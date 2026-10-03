@@ -1190,7 +1190,8 @@ function bindBatch(){
     $('bfire').disabled=BP.count===0;
   };
   $('bfire').onclick=async()=>{
-    const at=$('atstart').checked&&D.publicDrop?D.publicDrop.start:null;
+    // same rule as the main button: arm while shut, send once open
+    const at=(D.publicDrop && D.publicDrop.start>Date.now()/1000)?D.publicDrop.start:null;
     $('bout').insertAdjacentHTML('beforeend',
       `<div class="note" id="bfo">${at?'armed — waiting for stage open…':'firing all…'}</div>`);
     const r=await j('/api/batch/fire',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1227,7 +1228,8 @@ function bindMint(){
     $('fireb').disabled=false;
   };
   $('fireb').onclick=async()=>{
-    const at=$('atstart').checked&&D.publicDrop?D.publicDrop.start:null;
+    // same rule as the main button: arm while shut, send once open
+    const at=(D.publicDrop && D.publicDrop.start>Date.now()/1000)?D.publicDrop.start:null;
     $('fireout').innerHTML=`<span class="muted">${at?'armed — waiting for stage open…':'firing…'}</span>`;
     const r=await j('/api/fire',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({rpc:P.rpc,raw:P.raw,lanes:+$('lanes').value,at,chain:C.chain})});
