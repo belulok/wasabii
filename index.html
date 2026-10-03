@@ -900,23 +900,39 @@ async function renderWallets(){
   const rpc=new ethers.JsonRpcProvider(D.rpc);
   for(let i=0;i<WALLETS.length;i++){
     const x=WALLETS[i];
+    const row=$('wr'+i); if(!row) continue;
+    const via=x.source==='key'?'<span class="ok">key · relayed</span>'
+                              :'extension · own broadcast';
+    const rm=`<td><a href="#" data-rm="${i}" class="muted" style="text-decoration:none">remove</a></td>`;
     try{
       const [e,bal]=await Promise.all([
         j(`/api/eligibility?contract=${C.contract}&chain=${C.chain}`+
           `&wallet=${x.address}&qty=${+$('bq').value||1}`),
         rpc.getBalance(x.address)]);
-      const row=$('wr'+i); if(!row) continue;
       const gas=Number(ethers.formatEther(bal));
+      if(e.error || e.maxNow===undefined){
+        // an unreadable row used to render as '—' and 0, which looks exactly
+        // like a wallet with no allowance left
+        row.innerHTML=`<td class="mono">${esc(x.address.slice(0,16))}…</td>
+          <td class="muted">${via}</td>
+          <td class="${gas>0?'ok':'err'}">${gas.toFixed(6)}</td>
+          <td colspan="2" class="err">could not read: ${esc(e.error||'unexpected reply')}</td>
+          ${rm}`;
+      }else{
+        x.max=e.maxNow;
+        row.innerHTML=`<td class="mono">${esc(x.address.slice(0,16))}…</td>
+          <td class="muted">${via}</td>
+          <td class="${gas>0?'ok':'err'}">${gas.toFixed(6)}</td>
+          <td>${e.minted}</td>
+          <td class="${e.maxNow?'ok':'err'}"><b>${e.maxNow}</b></td>${rm}`;
+      }
+    }catch(err){
       row.innerHTML=`<td class="mono">${esc(x.address.slice(0,16))}…</td>
-        <td class="muted">${x.source==='key'?'<span class="ok">key · relayed</span>'
-                             :'extension · own broadcast'}</td>
-        <td class="${gas>0?'ok':'err'}">${gas.toFixed(6)}</td>
-        <td>${e.minted??'—'}</td>
-        <td class="${e.maxNow?'ok':'err'}"><b>${e.maxNow??0}</b></td>
-        <td><a href="#" data-rm="${i}" class="muted" style="text-decoration:none">remove</a></td>`;
-      row.querySelector('[data-rm]').onclick=ev=>{
-        ev.preventDefault(); WALLETS.splice(i,1); renderWallets(); };
-    }catch(err){}
+        <td class="muted">${via}</td>
+        <td colspan="3" class="err">${esc(String(err.message||err).slice(0,60))}</td>${rm}`;
+    }
+    const rmEl=row.querySelector('[data-rm]');
+    if(rmEl) rmEl.onclick=ev=>{ ev.preventDefault(); WALLETS.splice(i,1); renderWallets(); };
   }
 }
 
@@ -928,11 +944,24 @@ function bindBrowserSign(){
     if(!window.ethereum){
       out('<span class="err">No wallet extension found — use “Add by private key”.</span>');return}
     try{
+      // eth_requestAccounts silently returns whatever is already permitted, so
+      // clicking again appears to do nothing. Asking for the permission again
+      // is what re-opens MetaMask's picker, where several accounts can be
+      // ticked at once.
+      try{
+        await window.ethereum.request({method:'wallet_requestPermissions',
+                                       params:[{eth_accounts:{}}]});
+      }catch(e){ /* dismissed — fall back to what is already permitted */ }
       const prov=new ethers.BrowserProvider(window.ethereum);
-      await prov.send('eth_requestAccounts',[]);
-      const signer=await prov.getSigner();
-      addWallet(await signer.getAddress(), signer, 'extension');
-      out(''); renderWallets(); planFunding();
+      const accounts=await prov.send('eth_requestAccounts',[]);
+      let added=0;
+      for(const a of accounts){
+        const signer=await prov.getSigner(a);
+        if(addWallet(a, signer, 'extension')) added++;
+      }
+      out(added?'':'<span class="muted">those accounts are already in the list — '
+        +'tick more in MetaMask to add others.</span>');
+      renderWallets(); planFunding();
     }catch(e){ out(`<span class="err">${esc(e.shortMessage||e.message||e)}</span>`) }
   };
 
