@@ -1065,6 +1065,36 @@ function bindBrowserSign(){
     if(!WALLETS.length){ out('<span class="err">add a wallet first</span>'); return }
     const qty=+$('bq').value;
     const rpc=new ethers.JsonRpcProvider(D.rpc);
+
+    // Re-read the drop immediately before signing. A creator can change the
+    // price minutes before a stage opens -- ETHMON went from free to
+    // 0.00035/token at launch -- and signing against a stale read sends
+    // value:0 into a paid mint, which reverts on every wallet.
+    let live;
+    try{ live=await j(`/api/drop?contract=${C.contract}&chain=${C.chain}`); }catch(e){}
+    if(live && live.publicDrop){
+      const was=BigInt(D.publicDrop?D.publicDrop.price:0);
+      const now=BigInt(live.publicDrop.price);
+      const cap=live.publicDrop.perWallet;
+      if(now!==was){
+        D=live;
+        out(`<div class="verdict n">the price changed — nothing signed</div>
+          <div class="note">This drop now costs <b>${ethers.formatEther(now)} ETH</b> per
+            token${was===0n?' (it was free when this page loaded)':
+            ` instead of ${ethers.formatEther(was)}`} — <b>${ethers.formatEther(now*BigInt(qty))} ETH</b>
+            for ${qty}, per wallet. Check the figures and press Mint again to go ahead
+            at the new price.</div>`);
+        renderWallets();
+        return;
+      }
+      if(qty>cap){
+        out(`<div class="verdict n">per-wallet cap is now ${cap}</div>`);
+        D=live; renderWallets(); return;
+      }
+      if(live.publicDrop.start>Date.now()/1000+1 && !atWanted){
+        out('<div class="verdict n">the stage is not open yet</div>'); return;
+      }
+    }
     const price=BigInt(D.publicDrop?D.publicDrop.price:0)*BigInt(qty);
     const fee=await rpc.getFeeData();
     const items=[], failed=[], viaExt=[];
@@ -1096,8 +1126,16 @@ function bindBrowserSign(){
     }
 
     if(locals.length) out(`<span class="muted">signing ${locals.length} in this tab…</span>`);
+    const needEach=price+(160000n*(fee.gasPrice||1n));
     for(const x of locals){
       try{
+        const bal=await rpc.getBalance(x.address);
+        if(bal<needEach){
+          failed.push({a:x.address,
+            why:`holds ${(+ethers.formatEther(bal)).toFixed(6)}, needs `
+               +`${(+ethers.formatEther(needEach)).toFixed(6)} for ${qty} plus gas`});
+          continue;
+        }
         const sd=new ethers.Contract(SEADROP_ADDR,SEADROP_ABI,x.signer);
         const tx=await sd.mintPublic.populateTransaction(
           C.contract,FEE_ADDR,ethers.ZeroAddress,qty,{value:price});
