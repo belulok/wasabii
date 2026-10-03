@@ -1,5 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Wasabi</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141714'/%3E%3Cpath d='M6 23c2.6-8.5 6-12.8 10-12.8S23.4 14.5 26 23z' fill='none' stroke='%238ec63f' stroke-width='2.4' stroke-linejoin='round'/%3E%3Cpath d='M16 10.2V5.6' stroke='%238ec63f' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
@@ -497,8 +498,9 @@ async function run(push=true){
 
   // 5 — mint, waits for the operator
   const Lm=line('ready — mint needs your confirmation').ok();
-  const w=await j('/api/wallets');
-  Lm.out('mint',`<div class="row">
+  let ME={}; try{ ME=await j('/auth/me'); }catch(e){}
+  const w = ME.owner ? await j('/api/wallets') : {accounts:[]};
+  Lm.out('mint', (ME.owner ? `<div class="row">
       <select class="f" id="acct">${(w.accounts||[]).map(a=>`<option>${esc(a)}</option>`).join('')
         ||'<option value="">no keystores found</option>'}</select>
       <label class="muted" style="font-size:12px">qty <input type="number" id="qty" value="${
@@ -509,6 +511,8 @@ async function run(push=true){
       <button class="f fire" id="fireb" disabled>Fire</button>
     </div>
     <div id="elig" style="margin-top:12px"></div>
+
+
     <div id="prepout" style="margin-top:12px" class="note">Prepare signs offline — one Touch ID
       prompt in the terminal running the server. Firing is then only a socket write.</div>
     <div id="fireout" style="margin-top:10px"></div>
@@ -529,6 +533,26 @@ async function run(push=true){
         own nonce, all submitted together. Keys are read from the file inside the server
         and never sent to this page. Use this where every wallet is a different person;
         the per-wallet cap is the project's way of spreading supply.</div>
+    </div>` : '') + `
+    <div id="elig2"></div>
+    <div style="margin-top:20px;padding-top:15px;border-top:1px solid #1e232b">
+      <div class="lbl" style="margin-bottom:9px">sign in your browser
+        <i>— your key never leaves this tab</i></div>
+      <div class="row">
+        <button class="f" id="connect">Connect wallet</button>
+        <span class="muted" style="font-size:12px">or</span>
+        <input id="pk" class="f" type="password" style="flex:1;min-width:260px"
+               placeholder="private key — kept in this tab, never sent anywhere"
+               autocomplete="off" spellcheck="false">
+        <label class="muted" style="font-size:12px">qty
+          <input type="number" id="bq" value="10" min="1"></label>
+        <button class="f fire" id="bsend">Sign &amp; relay</button>
+      </div>
+      <div id="bsout" style="margin-top:11px"></div>
+      <div class="note">Signing happens here, in your browser. Only the finished signed
+        transaction is posted to this server, which exists to put it in front of the
+        sequencer from <b>~19ms</b> away instead of ~264ms. The server has no way to
+        read your key, so it cannot spend anything of yours.</div>
     </div>`);
   bindMint();
   checkElig();
@@ -603,6 +627,8 @@ function bindBatch(){
 }
 
 function bindMint(){
+  bindBrowserSign();
+  if(!$('acct')) return;          // non-owners get browser signing only
   $('acct').onchange=checkElig; $('qty').onchange=checkElig;
   bindBatch();
   $('prep').onclick=async()=>{

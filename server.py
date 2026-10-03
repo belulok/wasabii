@@ -46,6 +46,12 @@ USERS_FILE = os.path.join(HERE, 'users.json')
 SESSION_TTL = int(os.environ.get('SESSION_TTL', 60 * 60 * 12))
 ALLOWED = {e.strip().lower() for e in
            os.environ.get('WASABI_ALLOWED_EMAILS', '').split(',') if e.strip()}
+# With OPEN_SIGNUP anyone may create an account, because accounts no longer
+# grant access to key material -- browsers sign for themselves and the server
+# only relays. Reading wallet files from this host stays with OWNERS.
+OPEN_SIGNUP = os.environ.get('OPEN_SIGNUP', '0') == '1'
+OWNERS = {e.strip().lower() for e in
+          os.environ.get('WASABI_OWNERS', '').split(',') if e.strip()}
 GOOGLE_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
 GOOGLE_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
 PUBLIC_URL = os.environ.get('PUBLIC_URL', '').rstrip('/')
@@ -105,11 +111,12 @@ def check_pw(pw, stored):
 
 
 def email_allowed(email):
-    """An empty allowlist means first-run claim: the first account owns it."""
     email = (email or '').lower()
+    if OPEN_SIGNUP:
+        return '@' in email
     if ALLOWED:
         return email in ALLOWED
-    return not _users()
+    return not _users()          # first-run claim
 
 
 def new_session(email):
@@ -852,6 +859,26 @@ def burst(rpcurl, raw, at, chain=None, lead=0.4, interval=0.025, window=4.0,
             'firstAt': attempts[0]['at'] if attempts else None}
 
 
+def relay(raw, chain, at=None, lanes=2):
+    """Submit an already-signed transaction. The server never sees a key.
+
+    This is the whole public surface: a browser signs locally with its own
+    key or an injected wallet, and posts only the signed bytes here. The
+    value this host adds is position -- it sits ~19ms from the Robinhood
+    sequencer in us-east-2, against ~264ms from Singapore -- not custody.
+    """
+    if not isinstance(raw, str) or not re.fullmatch(r'0x[0-9a-fA-F]{64,}', raw or ''):
+        raise ValueError('expected a signed raw transaction as 0x-hex')
+    if len(raw) > 60000:
+        raise ValueError('transaction too large')
+    if chain not in CHAINS:
+        raise ValueError(f'unknown chain {chain!r}')
+    rpcurl, _ = CHAINS[chain]
+    out = fire(rpcurl, raw, max(1, min(int(lanes), 4)), at, chain)
+    return {'txHash': out.get('txHash'), 'target': out.get('target'),
+            'direct': out.get('direct'), 'results': out.get('results')}
+
+
 # ---------------------------------------------------------------- batch mint
 # One transaction per wallet, each taking its own allowance. These are N
 # DIFFERENT transactions with different senders and nonces, so unlike the
@@ -873,6 +900,14 @@ def read_wallet_file(path):
             continue
         seen.add(a.lower()); out.append((a, k))
     return out
+
+
+def is_owner(email):
+    """Only the first allowlisted account may touch wallet files on this host."""
+    if not email:
+        return False
+    owners = OWNERS or (ALLOWED and {sorted(ALLOWED)[0]}) or set()
+    return email.lower() in owners
 
 
 def batch_preflight(path, contract, chain, qty):
@@ -1167,12 +1202,16 @@ class H(http.server.BaseHTTPRequestHandler):
             if u.path == '/api/market':
                 return self._send(market(q['slug'][0]))
             if u.path == '/api/address':
+                if not is_owner(self._who()) and not self._token_ok():
+                    return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 out, _ = cast(['wallet', 'address', '--account', q['account'][0]], timeout=120)
                 return self._send({'address': out})
             if u.path == '/api/submitbench':
                 return self._send(bench_submit(q['rpc'][0], q.get('chain', [None])[0],
                                                int(q.get('n', ['10'])[0])))
             if u.path == '/api/batch/preflight':
+                if not is_owner(self._who()) and not self._token_ok():
+                    return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(batch_preflight(q['path'][0], q['contract'][0],
                                                   q['chain'][0], int(q.get('qty', ['10'])[0])))
             if u.path == '/api/key':
@@ -1187,6 +1226,8 @@ class H(http.server.BaseHTTPRequestHandler):
                                    'source': 'env' if os.environ.get('OPENSEA_API_KEY')
                                              else ('minted' if k else 'none')})
             if u.path == '/api/wallets':
+                if not is_owner(self._who()) and not self._token_ok():
+                    return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 out, _ = cast(['wallet', 'list'])
                 names = [l.split()[0] for l in (out or '').splitlines() if l.strip()]
                 return self._send({'accounts': names})
@@ -1199,7 +1240,9 @@ class H(http.server.BaseHTTPRequestHandler):
         if u.path == '/auth/me':
             who = self._who()
             return self._send({'email': who, 'google': bool(GOOGLE_ID),
-                               'claimable': not ALLOWED and not _users()})
+                               'owner': is_owner(who) or self._token_ok(),
+                               'open': OPEN_SIGNUP,
+                               'claimable': not OPEN_SIGNUP and not ALLOWED and not _users()})
         if u.path == '/auth/logout':
             sid = self._cookie('wsid')
             with _authlock:
@@ -1304,18 +1347,31 @@ class H(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         try:
             if u.path == '/api/prepare':
+                if not is_owner(self._who()) and not self._token_ok():
+                    return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(prepare(d['contract'], d['chain'], int(d['qty']), d['account']))
+            if u.path == '/api/relay':
+                return self._send(relay(d.get('raw'), d.get('chain'),
+                                        d.get('at'), d.get('lanes', 2)))
             if u.path == '/api/batch/prepare':
+                if not is_owner(self._who()) and not self._token_ok():
+                    return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(batch_prepare(d['path'], d['contract'], d['chain'],
                                                 int(d.get('qty', 10))))
             if u.path == '/api/batch/fire':
+                if not is_owner(self._who()) and not self._token_ok():
+                    return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(batch_fire(d['rpc'], d['items'], d.get('at'), d.get('chain')))
             if u.path == '/api/burst':
+                if not is_owner(self._who()) and not self._token_ok():
+                    return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(burst(d['rpc'], d['raw'], float(d['at']), d.get('chain'),
                                         float(d.get('lead', 0.4)),
                                         float(d.get('interval', 0.025)),
                                         float(d.get('window', 4.0))))
             if u.path == '/api/fire':
+                if not is_owner(self._who()) and not self._token_ok():
+                    return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(fire(d['rpc'], d['raw'], int(d.get('lanes', 8)),
                                        d.get('at'), d.get('chain')))
             self._send({'error': 'not found'}, 404)
