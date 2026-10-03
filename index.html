@@ -76,6 +76,11 @@ h1 .mark{width:30px;height:30px;color:var(--acc);flex:none;transition:width .45s
 .out .lbl{color:#5d646e;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
   margin:0 0 9px}
 .out .lbl i{font-style:normal;opacity:.65;text-transform:none;letter-spacing:0}
+#acct{position:fixed;top:14px;right:18px;z-index:20;display:flex;align-items:center;gap:10px;
+  font-size:12px;color:var(--mut);font-family:var(--mono)}
+#acct a{color:var(--mut);text-decoration:none;border:1px solid var(--line);
+  border-radius:7px;padding:5px 10px;background:#13161a}
+#acct a:hover{color:var(--fg);border-color:var(--acc)}
 /* sub-steps: one line per field as it lands */
 .slns{margin-bottom:4px}
 .sln{display:flex;align-items:baseline;gap:7px;font-size:12.5px;line-height:1.95;
@@ -142,6 +147,7 @@ table.st td:not(:first-child),table.st th:not(:first-child){text-align:right}
   color:#8d949f;max-width:680px;line-height:1.65}
 .sum b{color:var(--fg);font-weight:600}
 </style>
+<div id="acct"></div>
 <div class="wrap">
   <div id="hero">
     <h1><svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
@@ -611,6 +617,12 @@ function bindMint(){
 $('go').onclick=run;
 $('url').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
 (async()=>{
+  try{
+    const me=await j('/auth/me');
+    $('acct').innerHTML = me.email
+      ? `<span>${esc(me.email)}</span><a href="/auth/logout">Sign out</a>`
+      : `<a href="/">Sign in</a>`;
+  }catch(e){}
   const k=await j('/api/key');
   $('keyst').innerHTML=k.have
     ?`<span class="badge g" style="margin-left:6px">key ${k.source==='env'?'env':'auto'}</span>`

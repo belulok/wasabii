@@ -15,3 +15,6 @@ wallets/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local accounts — password hashes and emails
+users.json

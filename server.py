@@ -19,9 +19,10 @@ one signed transaction are safe -- same nonce, same hash, so at most one can
 ever land.
 """
 import http.server, socketserver, json, subprocess, urllib.request, urllib.parse
-import ssl, http.client, threading, time, os, re, socket, secrets, hmac
+import ssl, http.client, threading, time, os, re, socket, secrets, hmac, hashlib, base64
 
 PORT = int(os.environ.get('PORT', '8899'))
+HERE = os.path.dirname(os.path.abspath(__file__))
 BIND = os.environ.get('BIND', '127.0.0.1')
 
 # Every endpoint can sign with whatever key material is on this host, so the
@@ -34,7 +35,132 @@ TOKEN = os.environ.get('WASABI_TOKEN') or secrets.token_urlsafe(24)
 # previously accepted absolute paths and "..", which on an exposed host is a
 # read primitive aimed at exactly the files that must never leak.
 WALLET_ROOTS = []
-HERE = os.path.dirname(os.path.abspath(__file__))
+
+# --------------------------------------------------------------------- auth
+# Accounts do not make a signing service safer on their own -- everyone who
+# gets in can sign with the same wallet files. They are worth it only because
+# they replace a token in the URL (which leaks into history, referrers and
+# screenshots) and because entry is restricted to an allowlist. Open signup
+# would mean custodying other people's keys on an internet-facing host.
+USERS_FILE = os.path.join(HERE, 'users.json')
+SESSION_TTL = int(os.environ.get('SESSION_TTL', 60 * 60 * 12))
+ALLOWED = {e.strip().lower() for e in
+           os.environ.get('WASABI_ALLOWED_EMAILS', '').split(',') if e.strip()}
+GOOGLE_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
+GOOGLE_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
+PUBLIC_URL = os.environ.get('PUBLIC_URL', '').rstrip('/')
+_sessions = {}          # sid -> {email, exp}
+_oauth_states = {}      # state -> exp
+_authlock = threading.Lock()
+
+
+def _users():
+    try:
+        return json.load(open(USERS_FILE))
+    except Exception:
+        return {}
+
+
+def _save_users(d):
+    old = os.umask(0o077)
+    try:
+        json.dump(d, open(USERS_FILE, 'w'), indent=2)
+    finally:
+        os.umask(old)
+
+
+# scrypt is preferred but is missing from some Python builds (notably the
+# macOS system interpreter, whose libressl does not expose it), so the format
+# carries its algorithm and PBKDF2 is used where scrypt is unavailable.
+HAVE_SCRYPT = hasattr(hashlib, 'scrypt')
+PBKDF2_ROUNDS = 600_000
+
+
+def _derive(pw, salt, alg):
+    if alg == 'scrypt':
+        return hashlib.scrypt(pw.encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
+    return hashlib.pbkdf2_hmac('sha256', pw.encode(), salt, PBKDF2_ROUNDS, dklen=32)
+
+
+def hash_pw(pw, salt=None):
+    alg = 'scrypt' if HAVE_SCRYPT else 'pbkdf2'
+    salt = salt or secrets.token_bytes(16)
+    dk = _derive(pw, salt, alg)
+    return f'{alg}${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}'
+
+
+def check_pw(pw, stored):
+    try:
+        parts = stored.split('$')
+        if len(parts) == 2:            # pre-tag records were scrypt
+            alg, s64, d64 = 'scrypt', parts[0], parts[1]
+        else:
+            alg, s64, d64 = parts
+        if alg == 'scrypt' and not HAVE_SCRYPT:
+            return False
+        dk = _derive(pw, base64.b64decode(s64), alg)
+        return hmac.compare_digest(dk, base64.b64decode(d64))
+    except Exception:
+        return False
+
+
+def email_allowed(email):
+    """An empty allowlist means first-run claim: the first account owns it."""
+    email = (email or '').lower()
+    if ALLOWED:
+        return email in ALLOWED
+    return not _users()
+
+
+def new_session(email):
+    with _authlock:
+        for sid, v in list(_sessions.items()):     # drop expired
+            if v['exp'] < time.time():
+                _sessions.pop(sid, None)
+        sid = secrets.token_urlsafe(32)
+        _sessions[sid] = {'email': email, 'exp': time.time() + SESSION_TTL}
+    return sid
+
+
+def session_email(sid):
+    v = _sessions.get(sid or '')
+    if not v or v['exp'] < time.time():
+        return None
+    return v['email']
+
+
+def google_auth_url(state, redirect_uri):
+    q = urllib.parse.urlencode({
+        'client_id': GOOGLE_ID, 'redirect_uri': redirect_uri,
+        'response_type': 'code', 'scope': 'openid email profile',
+        'state': state, 'access_type': 'online', 'prompt': 'select_account'})
+    return 'https://accounts.google.com/o/oauth2/v2/auth?' + q
+
+
+def google_exchange(code, redirect_uri):
+    """Swap the code for a token, then ask Google who it belongs to.
+
+    Reading userinfo over TLS avoids verifying the id_token's RSA signature,
+    which the standard library cannot do -- the answer comes straight from
+    Google either way.
+    """
+    body = urllib.parse.urlencode({
+        'code': code, 'client_id': GOOGLE_ID, 'client_secret': GOOGLE_SECRET,
+        'redirect_uri': redirect_uri, 'grant_type': 'authorization_code'}).encode()
+    req = urllib.request.Request('https://oauth2.googleapis.com/token', body,
+                                 {'Content-Type': 'application/x-www-form-urlencoded'})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        tok = json.load(r)
+    at = tok.get('access_token')
+    if not at:
+        raise ValueError('google did not return an access token')
+    req = urllib.request.Request('https://openidconnect.googleapis.com/v1/userinfo',
+                                 headers={'Authorization': 'Bearer ' + at})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        info = json.load(r)
+    if not info.get('email_verified'):
+        raise ValueError('google account has no verified email')
+    return info
 
 
 def load_env():
@@ -929,6 +1055,26 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
     # -------------------------------------------------- auth / csrf
+    def _cookie(self, name):
+        for part in (self.headers.get('Cookie') or '').split(';'):
+            k, _, v = part.strip().partition('=')
+            if k == name:
+                return v.strip()
+        return ''
+
+    def _who(self):
+        return session_email(self._cookie('wsid'))
+
+    def _authed(self):
+        return bool(self._who()) or self._token_ok()
+
+    def _base(self):
+        if PUBLIC_URL:
+            return PUBLIC_URL
+        host = self.headers.get('Host') or f'127.0.0.1:{PORT}'
+        proto = 'https' if self.headers.get('X-Forwarded-Proto') == 'https' else 'http'
+        return f'{proto}://{host}'
+
     def _token_ok(self):
         sent = (self.headers.get('X-Wasabi-Token') or '').strip()
         if not sent:
@@ -975,13 +1121,11 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
-        if not self._token_ok():
+        if u.path.startswith('/auth/'):
+            return self._auth_get(u, q)
+        if not self._authed():
             if u.path in ('/', '/index.html'):
-                b = (b'<meta charset=utf-8><body style="background:#0f1114;color:#e8eaed;'
-                     b'font:14px ui-sans-serif;padding:60px;text-align:center">'
-                     b'<h1 style="font-size:16px;letter-spacing:.1em">wasabi</h1>'
-                     b'<p style="color:#8d949f">Open this with the access token the server '
-                     b'printed on startup:<br><code>?token=...</code></p>')
+                b = open(os.path.join(HERE, 'login.html'), 'rb').read()
                 self.send_response(401)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Content-Length', str(len(b)))
@@ -1041,8 +1185,108 @@ class H(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             self._send({'error': f'{type(e).__name__}: {e}'}, 500)
 
+    # ------------------------------------------------------- auth routes
+    def _auth_get(self, u, q):
+        if u.path == '/auth/me':
+            who = self._who()
+            return self._send({'email': who, 'google': bool(GOOGLE_ID),
+                               'claimable': not ALLOWED and not _users()})
+        if u.path == '/auth/logout':
+            sid = self._cookie('wsid')
+            with _authlock:
+                _sessions.pop(sid, None)
+            self.send_response(302)
+            self.send_header('Location', '/')
+            self.send_header('Set-Cookie', 'wsid=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
+            self.end_headers(); return
+        if u.path == '/auth/google/start':
+            if not GOOGLE_ID:
+                return self._deny(400, 'google sign-in is not configured')
+            state = secrets.token_urlsafe(24)
+            with _authlock:
+                _oauth_states[state] = time.time() + 600
+            self.send_response(302)
+            self.send_header('Location',
+                             google_auth_url(state, self._base() + '/auth/google/callback'))
+            self.end_headers(); return
+        if u.path == '/auth/google/callback':
+            state = (q.get('state') or [''])[0]
+            with _authlock:
+                exp = _oauth_states.pop(state, None)
+            if not exp or exp < time.time():
+                return self._deny(400, 'bad or expired oauth state')
+            try:
+                info = google_exchange((q.get('code') or [''])[0],
+                                       self._base() + '/auth/google/callback')
+            except Exception as e:
+                return self._deny(400, f'google sign-in failed: {e}')
+            email = (info.get('email') or '').lower()
+            users = _users()
+            if email not in users and not email_allowed(email):
+                return self._deny(403, f'{email} is not on the allowlist')
+            if email not in users:
+                users[email] = {'via': 'google', 'created': int(time.time())}
+                _save_users(users)
+            sid = new_session(email)
+            self.send_response(302)
+            self.send_header('Location', '/')
+            self.send_header('Set-Cookie',
+                             f'wsid={sid}; Path=/; HttpOnly; SameSite=Lax; Secure'
+                             if self.headers.get('X-Forwarded-Proto') == 'https'
+                             else f'wsid={sid}; Path=/; HttpOnly; SameSite=Lax')
+            self.end_headers(); return
+        return self._deny(404, 'not found')
+
+    def _auth_post(self, path, d):
+        email = (d.get('email') or '').strip().lower()
+        pw = d.get('password') or ''
+        if not email or '@' not in email:
+            return self._deny(400, 'enter a valid email')
+        if len(pw) < 10:
+            return self._deny(400, 'password must be at least 10 characters')
+        users = _users()
+        if path == '/auth/signup':
+            if email in users:
+                return self._deny(409, 'that account already exists — sign in instead')
+            if not email_allowed(email):
+                return self._deny(403, 'this email is not on the allowlist')
+            users[email] = {'via': 'password', 'pw': hash_pw(pw),
+                            'created': int(time.time())}
+            _save_users(users)
+        elif path == '/auth/login':
+            rec = users.get(email)
+            # same response either way, so the endpoint does not reveal who exists
+            if not rec or not rec.get('pw') or not check_pw(pw, rec['pw']):
+                time.sleep(0.4)
+                return self._deny(401, 'wrong email or password')
+        else:
+            return self._deny(404, 'not found')
+        sid = new_session(email)
+        b = json.dumps({'email': email}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(b)))
+        self.send_header('Set-Cookie',
+                         f'wsid={sid}; Path=/; HttpOnly; SameSite=Lax; Secure'
+                         if self.headers.get('X-Forwarded-Proto') == 'https'
+                         else f'wsid={sid}; Path=/; HttpOnly; SameSite=Lax')
+        self._secure_headers(); self.end_headers(); self.wfile.write(b)
+
     def do_POST(self):
-        if not self._token_ok():
+        u0 = urllib.parse.urlparse(self.path)
+        if u0.path.startswith('/auth/'):
+            if not self._origin_ok():
+                return self._deny(403, 'cross-site request refused')
+            n0 = int(self.headers.get('Content-Length', 0))
+            try:
+                d0 = json.loads(self.rfile.read(n0) or b'{}')
+            except Exception:
+                return self._deny(400, 'bad json')
+            try:
+                return self._auth_post(u0.path, d0)
+            except Exception as e:
+                return self._deny(500, f'{type(e).__name__}: {e}')
+        if not self._authed():
             return self._deny(401, 'unauthorised')
         if not self._origin_ok():
             return self._deny(403, 'cross-site request refused')
