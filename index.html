@@ -83,6 +83,57 @@ h1 .mark{width:38px;height:38px;color:var(--acc);flex:none;transition:width .45s
 #acct a{color:var(--mut);text-decoration:none;border:1px solid var(--line);
   border-radius:7px;padding:5px 10px;background:#13161a}
 #acct a:hover{color:var(--fg);border-color:var(--acc)}
+#burger{position:fixed;top:12px;right:14px;z-index:22;width:38px;height:34px;padding:8px 9px;
+  background:#13161a;border:1px solid var(--line);border-radius:8px;cursor:pointer;
+  display:none;flex-direction:column;justify-content:space-between}
+#burger span{display:block;height:2px;background:var(--mut);border-radius:2px}
+#burger.open span{background:var(--acc)}
+
+@media(max-width:720px){
+  #burger{display:flex}
+  #acct{position:fixed;top:54px;right:12px;left:12px;flex-direction:column;align-items:stretch;
+    gap:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:6px;display:none}
+  #acct.open{display:flex}
+  #acct a,#acct span{border:0;border-radius:6px;padding:11px 12px;text-align:left;
+    background:none;font-size:13px}
+  #acct a{border-top:1px solid #1e232b}
+  #acct a:first-child{border-top:0}
+
+  .wrap{padding:0 14px 60px}
+  #hero{min-height:auto;padding-top:62px}
+  h1{font-size:25px}
+  h1 .mark{width:28px;height:28px}
+  .sub{font-size:12.5px;margin:10px 0 20px}
+
+  /* search stacks: full-width field, chain and action on one row beneath */
+  .search{flex-wrap:wrap;padding:8px;gap:8px;border-radius:11px}
+  .search input{flex:1 0 100%;padding:10px 4px;font-size:16px}  /* 16px stops iOS zooming */
+  .search .div{display:none}
+  .search select{flex:1;border:1px solid var(--line);border-radius:8px;padding:9px 8px}
+  .search button{flex:1;padding:10px 14px}
+  #hero.ran .search input{font-size:16px}
+  .hint{font-size:11.5px}
+
+  .feats{grid-template-columns:1fr;gap:18px}
+  .pitch{margin-top:26px}
+
+  /* terminal output: let long hashes scroll instead of breaking the layout */
+  #term{font-size:11.5px;line-height:1.75}
+  .out{margin-left:4px;padding-left:11px}
+  .kv{grid-template-columns:104px 1fr;gap:3px 10px;font-size:11.5px}
+  .sln{font-size:11.5px}
+  .sln .v{max-width:52%}
+  table.st{display:block;overflow-x:auto;white-space:nowrap}
+  .lane{grid-template-columns:52px 1fr 60px}
+  .stat{gap:4px 16px}
+  .row{gap:7px}
+  .row input[type=number]{width:70px}
+  .row>button,.row>select{flex:1 1 auto}
+  #runbar{flex-wrap:wrap}
+  .rcard .top{gap:8px}
+  .rcard .acts{margin-left:0;width:100%}
+}
 #runbar{display:flex;align-items:center;gap:13px;margin:14px 0 0;font-family:var(--mono);
   font-size:12px}
 #runbar a{color:var(--acc);text-decoration:none}
@@ -180,6 +231,7 @@ table.st td:not(:first-child),table.st th:not(:first-child){text-align:right}
   color:#8d949f;max-width:680px;line-height:1.65}
 .sum b{color:var(--fg);font-weight:600}
 </style>
+<button id="burger" class="hidden" aria-label="menu"><span></span><span></span><span></span></button>
 <div id="acct"></div>
 <div class="wrap hidden" id="runsview">
   <div class="rhead"><h2>Runs</h2><a href="#" id="runsback">&larr; back</a>
@@ -247,6 +299,14 @@ const dt=t=>new Date(t*1000).toLocaleString();
 const j=async(u,o)=>{const r=await fetch(u,o);return r.json()};
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 let C=null,D=null,P=null,BP=null,tick=null;
+// Each run gets a generation. Starting another abandons the previous one: its
+// pending awaits still resolve, but they check the generation before writing,
+// so a slow stage scan cannot paint over the screen you moved on to.
+let GEN=0;
+// Completed runs are kept so the same collection does not get re-read from
+// scratch; the server-side jobs they produced are unaffected either way.
+const DONE_RUNS=new Map();
+const keyFor=q=>String(q||'').trim().toLowerCase();
 
 function line(text){
   const el=document.createElement('div');
@@ -464,9 +524,30 @@ function resetToHero(){
   loadRuns();
 }
 
-async function run(push=true){
+async function run(push=true, force=false){
   const q=$('url').value.trim();
   if(!q) return;
+  const key=keyFor(q);
+  const cached=DONE_RUNS.get(key);
+  if(cached && !force){
+    // same collection: show what we already have rather than running it twice
+    GEN++;
+    $('hero').classList.add('ran');
+    if(push) history.pushState({c:q},'', '?c='+encodeURIComponent(q));
+    $('runbar').classList.remove('hidden');
+    $('runwhat').innerHTML=`${esc(q)} <a href="#" id="rerun"
+      style="color:var(--acc);text-decoration:none;margin-left:10px">re-run</a>`;
+    $('term').innerHTML=cached.term;
+    C=cached.C; D=cached.D;
+    clearInterval(tick); countdown(); tick=setInterval(countdown,1000);
+    bindMint(); renderWallets();
+    $('rerun').onclick=e=>{e.preventDefault();run(false,true)};
+    $('go').disabled=false;
+    loadRuns();
+    return;
+  }
+  const gen=++GEN;
+  const alive=()=>gen===GEN;
   $('go').disabled=true;
   $('hero').classList.add('ran');
   // the run is addressable, so a refresh or a shared link rebuilds it instead
@@ -480,7 +561,8 @@ async function run(push=true){
 
   // 1 — resolve
   let L=line(`resolving <b>${esc($('url').value)}</b>`);
-  C=await j('/api/resolve?url='+encodeURIComponent($('url').value));
+  C=await j('/api/resolve?url='+encodeURIComponent(q));
+  if(!alive())return;
   if(C.error){L.fail(C.error);$('go').disabled=false;return}
   if($('chain').value)C.chain=$('chain').value;
   L.ok(`${C.name||C.contract.slice(0,10)+'…'} on ${C.chain}`);
@@ -509,6 +591,7 @@ async function run(push=true){
   // 2 — drop
   L=line(`reading drop from <b>${esc(C.chain)}</b>`);
   D=await j(`/api/drop?contract=${C.contract}&chain=${C.chain}`);
+  if(!alive())return;
   if(D.error){L.fail(D.error);$('go').disabled=false;return}
   const p=D.publicDrop,sup=+D.totalSupply||0,max=+D.maxSupply||0;
   const noStage=!p||(p.start===0&&p.end===0);
@@ -577,6 +660,7 @@ async function run(push=true){
   // 3 — latency
   L=line('benchmarking rpc <span class="muted">(12 warm + 6 cold)</span>');
   const b=await j('/api/bench?rpc='+encodeURIComponent(D.rpc)+'&n=12');
+  if(!alive())return;
   if(b.error){L.fail(b.error)}
   else{
     L.ok(`median ${b.warm?b.warm.med:'?'}ms`);
@@ -595,6 +679,7 @@ async function run(push=true){
   // 3b — write path
   L=line('timing the write path <span class="muted">(sequencer vs public rpc)</span>');
   const sb=await j(`/api/submitbench?rpc=${encodeURIComponent(D.rpc)}&chain=${C.chain}&n=10`);
+  if(!alive())return;
   if(sb.error||!sb.publicRpc){L.fail(sb.error||'unavailable')}
   else{
     const pr=sb.publicRpc,sq=sb.sequencer,tcp=sb.tcp;
@@ -626,6 +711,7 @@ async function run(push=true){
   // 4 — stage history
   L=line('scanning SeaDropMint events <span class="muted">(this one is slow)</span>');
   const r=await j(`/api/stages?contract=${C.contract}&chain=${C.chain}`);
+  if(!alive())return;
   if(r.error){L.fail(r.error)}
   else if(!r.stages.length){L.ok('no mints found')}
   else{
@@ -733,6 +819,12 @@ async function run(push=true){
     </details>` : ''}`);
   bindMint();
   checkElig();
+  if(alive()){
+    DONE_RUNS.set(key,{term:$('term').innerHTML, C, D, when:Date.now()});
+    $('runwhat').innerHTML=`${esc(q)} <a href="#" id="rerun"
+      style="color:var(--acc);text-decoration:none;margin-left:10px">re-run</a>`;
+    const rr=$('rerun'); if(rr) rr.onclick=e=>{e.preventDefault();run(false,true)};
+  }
   $('go').disabled=false;
 }
 
@@ -1111,6 +1203,13 @@ function bindMint(){
 }
 
 $('go').onclick=()=>run();
+$('burger').onclick=()=>{ $('acct').classList.toggle('open');
+                          $('burger').classList.toggle('open') };
+document.addEventListener('click',e=>{
+  if(window.innerWidth>720) return;
+  if(!e.target.closest('#acct')&&!e.target.closest('#burger'))
+    { $('acct').classList.remove('open'); $('burger').classList.remove('open') }
+});
 $('url').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
 $('newsearch').onclick=e=>{e.preventDefault();resetToHero();$('url').focus()};
 $('runsback').onclick=e=>{e.preventDefault();hideRuns();history.pushState({},'',location.pathname)};
@@ -1135,7 +1234,9 @@ addEventListener('popstate',()=>{
       ? `<span>${esc(me.email)}</span><a href="/auth/logout">Sign out</a>`
       : `<span title="authenticated by token, not a session">token session</span>`+
         `<a href="/login">Sign in</a>`);
-    $('navruns').onclick=e=>{e.preventDefault();showRuns()};
+    $('navruns').onclick=e=>{e.preventDefault();
+      $('acct').classList.remove('open'); $('burger').classList.remove('open');
+      showRuns()};
   }catch(e){}
   const k=await j('/api/key');
   $('keyst').innerHTML=k.have
