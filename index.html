@@ -816,8 +816,6 @@ async function runFresh(q,key,push,replayedAt){
       <label class="muted" style="font-size:12px">mint
         <input type="number" id="bq" value="${D.publicDrop?Math.min(10,D.publicDrop.perWallet||10):10}" min="1"></label>
       <span class="muted" style="font-size:12px">each</span>
-      <label class="muted" style="font-size:12px">
-        <input type="checkbox" id="atstart" style="width:auto"> wait for stage open</label>
       <span id="schedhint" class="muted" style="font-size:11.5px"></span>
       <button class="f fire" id="bsend">Mint</button>
     </div>
@@ -915,11 +913,14 @@ async function renderWallets(){
   const hint=$('schedhint');
   if(hint){
     const k=WALLETS.filter(x=>x.source==='key').length;
+    const open=D&&D.publicDrop&&Date.now()/1000>=D.publicDrop.start;
     hint.innerHTML = !WALLETS.length ? ''
-      : k===WALLETS.length ? `<span class="ok">all ${k} can be scheduled</span>`
-      : k ? `<span class="warn">only ${k} of ${WALLETS.length} can be scheduled</span>`
-          : `<span class="err">none can be scheduled — extension wallets only mint live</span>`;
+      : open ? ''
+      : k===WALLETS.length ? `<span class="ok">all ${k} will be armed and fired for you</span>`
+      : k ? `<span class="warn">${k} of ${WALLETS.length} can be armed; the rest must mint live</span>`
+          : `<span class="err">extension wallets cannot be armed — add keys, or mint when it opens</span>`;
   }
+  if(typeof window.__refreshMintButton==='function') window.__refreshMintButton();
   const warn = exts===WALLETS.length && WALLETS.length>1
     ? `<div class="note err" style="margin-bottom:9px">All ${WALLETS.length} are extension
          wallets, so each will prompt MetaMask separately and broadcast at its own RPC —
@@ -1028,6 +1029,38 @@ function bindBrowserSign(){
 
   $('bq').onchange=renderWallets;
 
+  // The stage time and the wallet types already determine what should happen,
+  // so the button says it and does it rather than asking. It re-evaluates
+  // every second, flipping from armed to live the moment the stage opens.
+  let btnMode='none';
+  function refreshButton(){
+    const b=$('bsend'); if(!b||!D||!D.publicDrop) return;
+    const p=D.publicDrop, now=Date.now()/1000;
+    const keys=WALLETS.filter(x=>x.source==='key').length;
+    const n=WALLETS.length;
+    const left=Math.max(0,Math.ceil(p.start-now));
+    const hm=left>3600?`${Math.floor(left/3600)}h ${Math.floor(left%3600/60)}m`
+            :left>60?`${Math.floor(left/60)}m ${left%60}s`:`${left}s`;
+    if(!n){ b.disabled=true; b.textContent='Mint'; btnMode='none'; return }
+    if(now>=p.end){ b.disabled=true; b.textContent='Mint ended'; btnMode='ended'; return }
+    if(now>=p.start){
+      b.disabled=false; b.textContent=`Mint now · ${n} wallet${n===1?'':'s'}`;
+      btnMode='now'; return;
+    }
+    if(keys){
+      b.disabled=false;
+      b.textContent=`Arm for ${new Date(p.start*1000).toLocaleTimeString()} · in ${hm}`;
+      btnMode='arm';
+    }else{
+      b.disabled=true;
+      b.textContent=`Opens in ${hm}`;
+      btnMode='wait';
+    }
+  }
+  refreshButton();
+  setInterval(refreshButton,1000);
+  window.__refreshMintButton=refreshButton;
+
   $('bsend').onclick=async()=>{
     if(!WALLETS.length){ out('<span class="err">add a wallet first</span>'); return }
     const qty=+$('bq').value;
@@ -1036,7 +1069,8 @@ function bindBrowserSign(){
     const fee=await rpc.getFeeData();
     const items=[], failed=[], viaExt=[];
     const locals=WALLETS.filter(x=>x.source==='key');
-    const atWanted=$('atstart').checked&&D.publicDrop&&D.publicDrop.start>Date.now()/1000;
+    // schedule whenever the stage is still shut; mint directly once it is open
+    const atWanted=D.publicDrop && D.publicDrop.start > Date.now()/1000;
     // An extension cannot be scheduled: MetaMask will not hand back a signed
     // transaction to hold, only sign-and-broadcast now. Firing these early
     // would revert with "stage not active" and burn gas on every one, so they
@@ -1045,11 +1079,10 @@ function bindBrowserSign(){
     const deferred=atWanted?WALLETS.filter(x=>x.source!=='key').length:0;
 
     if(deferred && !locals.length){
-      out(`<div class="verdict n">cannot schedule extension wallets</div>
-        <div class="note">MetaMask only signs and broadcasts in one step — there is no
-          signed transaction to hold until the stage opens, so these ${deferred} cannot be
-          armed. Either untick <b>wait for stage open</b> and mint manually when it opens,
-          or add the wallets by private key, which can be signed here and scheduled.</div>`);
+      out(`<div class="verdict n">these cannot be armed in advance</div>
+        <div class="note">MetaMask only signs and broadcasts in one step, so there is no
+          signed transaction to hold until the stage opens. Add the wallets by private
+          key to arm them, or come back when the stage is open and mint live.</div>`);
       return;
     }
 
@@ -1094,7 +1127,7 @@ function bindBrowserSign(){
           Recorded under <b>Runs</b>.</div>`:''}
         ${failed.length?`<div class="note err">${esc((failed[0]||{}).why||'')}</div>`:''}`);
       renderWallets(); loadRuns(); return }
-    const at=$('atstart').checked&&D.publicDrop?D.publicDrop.start:null;
+    const at=atWanted?D.publicDrop.start:null;
     out(`<span class="ok">${items.length} signed</span> <span class="muted">· ${
       at?'waiting for the stage to open':'relaying'}…</span>`);
     const r=await j('/api/relay/batch',{method:'POST',headers:{'Content-Type':'application/json'},
