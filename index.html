@@ -201,7 +201,17 @@ table.st td:not(:first-child),table.st th:not(:first-child){text-align:right}
 </div>
 <script>
 const $=id=>document.getElementById(id);
-const esc=s=>String(s??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+// Quotes matter as much as angle brackets: these values land inside
+// attributes, and collection name/image/site come from whoever deployed the
+// collection. With private keys held in this tab, one breakout is key theft.
+const esc=s=>String(s??'').replace(/[<>&"'`]/g,c=>
+  ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c]));
+// Only ever emit links and images we can see are plain http(s).
+const safeUrl=u=>{
+  try{ const x=new URL(String(u));
+       return (x.protocol==='https:'||x.protocol==='http:') ? x.href : ''; }
+  catch(e){ return ''; }
+};
 const dt=t=>new Date(t*1000).toLocaleString();
 const j=async(u,o)=>{const r=await fetch(u,o);return r.json()};
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
@@ -342,11 +352,11 @@ async function run(push=true){
   const osUrl=C.slug?`https://opensea.io/collection/${C.slug}`
     :`https://opensea.io/assets/${C.chain==='polygon'?'matic':C.chain}/${C.contract}`;
   cBlk.insertAdjacentHTML('beforeend',`<div class="head" style="margin-top:10px">
-    <img class="pfp" src="${C.image||''}" alt="" onerror="this.style.visibility='hidden'">
+    <img class="pfp" src="${esc(safeUrl(C.image))}" alt="" onerror="this.style.visibility='hidden'">
     <div style="flex:1"><div class="links" style="margin-top:0">
-      <a class="btn" target="_blank" rel="noopener" href="${osUrl}">OpenSea ↗</a>
+      <a class="btn" target="_blank" rel="noopener" href="${esc(safeUrl(osUrl))}">OpenSea ↗</a>
       <a class="btn" target="_blank" rel="noopener" id="expl" href="#">Explorer ↗</a>
-      ${C.site?`<a class="btn" target="_blank" rel="noopener" href="${esc(C.site)}">Website ↗</a>`:''}
+      ${C.site?`<a class="btn" target="_blank" rel="noopener" href="${esc(safeUrl(C.site))}">Website ↗</a>`:''}
     </div></div></div><div id="mkt"></div>`);
   await wait(260);
 

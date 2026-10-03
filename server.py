@@ -1173,6 +1173,23 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Referrer-Policy', 'no-referrer')
+        # Private keys live in the page, so the point of this policy is
+        # connect-src: even if something did execute, it has nowhere to send
+        # them. Scripts still need unsafe-inline because the app is one
+        # inline block; that is the weakness this compensates for.
+        self.send_header('Content-Security-Policy', '; '.join([
+            "default-src 'self'",
+            "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data: https://i2c.seadn.io https://i.seadn.io",
+            "connect-src 'self' https://rpc.mainnet.chain.robinhood.com "
+            "https://ethereum-rpc.publicnode.com https://mainnet.base.org "
+            "https://arb1.arbitrum.io https://mainnet.optimism.io "
+            "https://polygon-bor-rpc.publicnode.com",
+            "form-action 'self'",
+            "base-uri 'none'",
+            "frame-ancestors 'none'",
+        ]))
 
     def _send(self, obj, code=200):
         b = json.dumps(obj).encode()
