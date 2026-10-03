@@ -43,10 +43,19 @@ if ! command -v cast >/dev/null; then
 fi
 
 echo "==> app"
+# Clone before creating anything inside APP_DIR -- git refuses a non-empty
+# target, and the wallets directory would otherwise make it one.
+if [ -d "$APP_DIR/.git" ]; then
+  git -C "$APP_DIR" pull -q || true
+else
+  tmp=$(mktemp -d)
+  git clone -q https://github.com/belulok/wasabii.git "$tmp/repo"
+  mkdir -p "$APP_DIR"
+  cp -a "$tmp/repo/." "$APP_DIR/"
+  rm -rf "$tmp"
+fi
 mkdir -p "$APP_DIR/wallets"
 chmod 700 "$APP_DIR/wallets"
-[ -d "$APP_DIR/.git" ] || git clone -q https://github.com/belulok/wasabii.git "$APP_DIR"
-git -C "$APP_DIR" pull -q || true
 
 # A token is required; everything on this service can sign with whatever key
 # material is on the host, so there is no unauthenticated mode.
