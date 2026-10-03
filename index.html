@@ -93,6 +93,19 @@ h1 .mark{width:38px;height:38px;color:var(--acc);flex:none;transition:width .45s
   letter-spacing:.14em;text-transform:uppercase;margin-bottom:9px}
 #runsbox .hdr a{color:var(--acc);text-decoration:none;letter-spacing:0;text-transform:none;
   font-size:11.5px}
+#runsview{padding-top:26px}
+.rhead{display:flex;align-items:baseline;gap:16px;margin-bottom:18px}
+.rhead h2{margin:0;font-size:15px;letter-spacing:.14em;text-transform:uppercase;font-weight:600}
+.rhead a{color:var(--acc);text-decoration:none;font-size:12px;font-family:var(--mono)}
+.rcard{border:1px solid var(--line);border-radius:10px;padding:13px 15px;margin-bottom:10px;
+  background:var(--panel);font-family:var(--mono)}
+.rcard .top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;font-size:12.5px}
+.rcard .top b{font-weight:600}
+.rcard .meta{color:#6b727c;font-size:11.5px;margin-top:5px}
+.rcard .acts{margin-left:auto;display:flex;gap:12px}
+.rcard .acts a{color:#6b727c;text-decoration:none;font-size:11.5px}
+.rcard .acts a:hover{color:var(--acc)}
+.rcard .detail{margin-top:11px;border-top:1px solid #1e232b;padding-top:10px}
 .rj{display:grid;grid-template-columns:86px 1fr 128px 92px;gap:12px;align-items:baseline;
   padding:6px 0;border-top:1px solid #15181d;font-size:12px}
 .rj:first-of-type{border-top:0}
@@ -168,6 +181,11 @@ table.st td:not(:first-child),table.st th:not(:first-child){text-align:right}
 .sum b{color:var(--fg);font-weight:600}
 </style>
 <div id="acct"></div>
+<div class="wrap hidden" id="runsview">
+  <div class="rhead"><h2>Runs</h2><a href="#" id="runsback">&larr; back</a>
+    <a href="#" id="runsreload">refresh</a></div>
+  <div id="runsfull"></div>
+</div>
 <div class="wrap">
   <div id="hero">
     <h1><svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
@@ -358,6 +376,81 @@ async function loadRuns(){
   });
   clearInterval(runsTimer);
   if(pending) runsTimer=setInterval(loadRuns, 2000);   // only poll while something is live
+}
+
+// ---- the runs view ---------------------------------------------------------
+function fmtWhen(x){
+  if(x.status==='scheduled') return until(x.at);
+  if(x.lateBy>5) return `<span class="st failed">fired ${Math.round(x.lateBy)}s late</span>`;
+  return ago(x.finished||x.created);
+}
+
+async function showRuns(push=true){
+  $('runsview').classList.remove('hidden');
+  document.querySelector('.wrap:not(#runsview)').classList.add('hidden');
+  if(push) history.pushState({runs:1},'','?runs=1');
+  await loadRunsFull();
+}
+function hideRuns(){
+  $('runsview').classList.add('hidden');
+  document.querySelector('.wrap:not(#runsview)').classList.remove('hidden');
+}
+
+async function loadRunsFull(){
+  let r; try{ r=await j('/api/jobs?limit=60'); }catch(e){ return }
+  const runs=r.runs||[];
+  $('runsfull').innerHTML = runs.length ? runs.map(x=>`
+    <div class="rcard" id="rc-${esc(x.id)}">
+      <div class="top">
+        <b class="st ${esc(x.status)}">${esc(x.status)}</b>
+        <span>${esc(x.label||x.chain)}</span>
+        <span class="muted">${x.count} wallet${x.count===1?'':'s'} · ${x.tokens} tokens${
+          x.landed!=null?` · <span class="ok">${x.landed} landed</span>`:''}</span>
+        <span class="acts">
+          <a href="#" data-open="${esc(x.id)}">details</a>
+          ${x.status==='scheduled'?`<a href="#" data-cancel="${esc(x.id)}">cancel</a>`:''}
+        </span>
+      </div>
+      <div class="meta">${esc(x.chain)} · created ${ago(x.created)} · ${fmtWhen(x)}
+        · <span class="mono">${esc(x.id)}</span></div>
+      <div class="detail hidden" id="rd-${esc(x.id)}"></div>
+    </div>`).join('')
+    : '<div class="note">No runs yet. Arm a mint and it will appear here.</div>';
+
+  $('runsfull').querySelectorAll('[data-open]').forEach(a=>a.onclick=async e=>{
+    e.preventDefault();
+    const box=$('rd-'+a.dataset.open);
+    if(!box.classList.contains('hidden')){ box.classList.add('hidden'); return }
+    box.classList.remove('hidden');
+    box.innerHTML='<span class="muted">loading…</span>';
+    const d=await j('/api/jobs?id='+encodeURIComponent(a.dataset.open));
+    if(d.error){ box.innerHTML=`<span class="err">${esc(d.error)}</span>`; return }
+    const ex=d.explorer;
+    const res=d.results||[];
+    box.innerHTML=`<table class="st" style="max-width:780px">
+        <tr><th>wallet</th><th>qty</th><th>ms</th><th>result</th></tr>
+        ${(res.length?res:(d.wallets||[]).map(w=>({address:w}))).map(x=>`<tr>
+          <td class="mono">${ex&&x.address?`<a href="${esc(ex)}/address/${esc(x.address)}"
+             target="_blank" rel="noopener" style="color:inherit">${esc((x.address||'').slice(0,16))}…</a>`
+             :esc((x.address||'').slice(0,16))+'…'}</td>
+          <td>${x.qty??''}</td><td>${x.ms??'—'}</td>
+          <td class="${x.result?'ok':(x.error?'err':'muted')}">${
+            x.result?(ex?`<a href="${esc(ex)}/tx/${esc(x.result)}" target="_blank"
+                 rel="noopener" style="color:inherit">${esc(x.result.slice(0,22))}…</a>`
+                        :esc(x.result.slice(0,22))+'…')
+                    :esc((x.error||'pending').slice(0,52))}</td></tr>`).join('')}
+      </table>
+      <div class="note">${d.at?`armed for ${new Date(d.at*1000).toLocaleString()}`:'sent immediately'}${
+        d.firedAt?` · fired ${new Date(d.firedAt*1000).toLocaleString()}`:''}</div>`;
+  });
+
+  $('runsfull').querySelectorAll('[data-cancel]').forEach(a=>a.onclick=async e=>{
+    e.preventDefault();
+    const r2=await j('/api/jobs/cancel',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id:a.dataset.cancel})});
+    if(r2.error) alert(r2.error);
+    loadRunsFull(); loadRuns();
+  });
 }
 
 function resetToHero(){
@@ -1020,21 +1113,29 @@ function bindMint(){
 $('go').onclick=()=>run();
 $('url').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
 $('newsearch').onclick=e=>{e.preventDefault();resetToHero();$('url').focus()};
+$('runsback').onclick=e=>{e.preventDefault();hideRuns();history.pushState({},'',location.pathname)};
+$('runsreload').onclick=e=>{e.preventDefault();loadRunsFull()};
 addEventListener('popstate',()=>{
-  const c=new URLSearchParams(location.search).get('c');
+  const sp=new URLSearchParams(location.search);
+  if(sp.get('runs')){ showRuns(false); return }
+  hideRuns();
+  const c=sp.get('c');
   if(c){ $('url').value=c; run(false); } else { resetToHero(); }
 });
 (async()=>{
   // restore a run from the URL, so refresh does not lose the screen
-  const c0=new URLSearchParams(location.search).get('c');
+  const sp0=new URLSearchParams(location.search);
+  if(sp0.get('runs')) showRuns(false);
+  const c0=sp0.get('c');
   if(c0){ $('url').value=c0; run(false); }
   loadRuns();
   try{
     const me=await j('/auth/me');
-    $('acct').innerHTML = me.email
+    $('acct').innerHTML = `<a href="#" id="navruns">Runs</a>` + (me.email
       ? `<span>${esc(me.email)}</span><a href="/auth/logout">Sign out</a>`
       : `<span title="authenticated by token, not a session">token session</span>`+
-        `<a href="/login">Sign in</a>`;
+        `<a href="/login">Sign in</a>`);
+    $('navruns').onclick=e=>{e.preventDefault();showRuns()};
   }catch(e){}
   const k=await j('/api/key');
   $('keyst').innerHTML=k.have

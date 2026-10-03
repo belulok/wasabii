@@ -1577,7 +1577,14 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(batch_preflight(q['path'][0], q['contract'][0],
                                                   q['chain'][0], int(q.get('qty', ['10'])[0])))
             if u.path == '/api/jobs':
-                return self._send({'runs': job_list(self._who() or 'token')})
+                owner = self._who() or 'token'
+                if q.get('id'):
+                    j = job_get(owner, q['id'][0])
+                    if not j:
+                        return self._deny(404, 'no such run')
+                    j['explorer'] = EXPLORER.get(j.get('chain'))
+                    return self._send(j)
+                return self._send({'runs': job_list(owner, int(q.get('limit', ['60'])[0]))})
             if u.path == '/api/key':
                 k = api_key()
                 try:
