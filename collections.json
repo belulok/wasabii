@@ -1,0 +1,32 @@
+{
+  "sheers": {
+    "slug": "sheers",
+    "name": "SHEERS",
+    "contract": "0x5ec84626f7fb3d0b08241179f2ed600b5a7cb6e5",
+    "chain": "robinhood",
+    "owner": "0x6f89b57e2cce43678defa2d6f059f4b3986bf341",
+    "site": "https://www.sinagrwa.com/",
+    "image": "https://i2c.seadn.io/collection/sheers/image_type_logo/ef079a8df6e37f4e59e4527bffbd48/74ef079a8df6e37f4e59e4527bffbd48.png",
+    "others": []
+  },
+  "ethmon": {
+    "slug": "ethmon",
+    "name": "ETHMON",
+    "contract": "0x46ea7e024255e62e02b840f5c975a36aaf4d8e8b",
+    "chain": "robinhood",
+    "owner": "0x77c59d890b1e22da28020d441284e85eaa6e1565",
+    "site": "https://eth-mon.com/",
+    "image": "https://i2c.seadn.io/collection/ethmon/image_type_logo/99a150ce090cd2370a341577c13238/e399a150ce090cd2370a341577c13238.gif",
+    "others": []
+  },
+  "sheer": {
+    "slug": "sheer",
+    "name": "SHEER - Kylie Jenner",
+    "contract": "0x2953399124f0cbb46d2cbacd8a89cf0599974963",
+    "chain": "polygon",
+    "owner": "0x1dc3c0ec93ad4ffa2a41b786150350174422de61",
+    "site": "https://showstudio.com/projects/sheer/",
+    "image": "https://i2c.seadn.io/collection/sheer/image/a31d014bc065a3755ed63c12accac1/5fa31d014bc065a3755ed63c12accac1.jpeg",
+    "others": []
+  }
+}

@@ -1,0 +1,620 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wasabi</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141714'/%3E%3Cpath d='M6 23c2.6-8.5 6-12.8 10-12.8S23.4 14.5 26 23z' fill='none' stroke='%238ec63f' stroke-width='2.4' stroke-linejoin='round'/%3E%3Cpath d='M16 10.2V5.6' stroke='%238ec63f' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root{--bg:#0f1114;--panel:#171a1f;--panel2:#1e222a;--line:#272c34;--fg:#e8eaed;
+  --mut:#8d949f;--acc:#8ec63f;--ok:#5bbf84;--bad:#e0655f;--warn:#d9a441;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1060px;margin:0 auto;padding:0 20px 80px}
+
+/* ---- hero: centred until a run starts, then it becomes the run header ---- */
+#hero{display:flex;flex-direction:column;justify-content:center;align-items:center;
+  min-height:72vh;transition:min-height .55s cubic-bezier(.22,1,.36,1)}
+#hero.ran{min-height:0;padding:22px 0 6px;align-items:stretch}
+h1{font-size:26px;letter-spacing:.12em;text-transform:lowercase;margin:0;font-weight:600;
+  display:flex;align-items:center;justify-content:center;gap:11px;
+  transition:font-size .45s ease,letter-spacing .45s ease,gap .45s ease}
+h1 .mark{width:30px;height:30px;color:var(--acc);flex:none;transition:width .45s ease,height .45s ease}
+#hero.ran h1{font-size:14px;letter-spacing:.1em;justify-content:flex-start;gap:8px}
+#hero.ran h1 .mark{width:17px;height:17px}
+.pitch{max-width:660px;margin:16px auto 24px;text-align:center;
+  transition:opacity .3s ease,max-height .45s ease,margin .45s ease}
+.pitch p{color:#9aa1ab;font-size:13.5px;line-height:1.7;margin:0 0 20px}
+.pitch p b{color:var(--fg);font-weight:600}
+.feats{display:grid;grid-template-columns:repeat(2,1fr);gap:11px 22px;text-align:left}
+.feats div{display:flex;flex-direction:column;gap:2px;padding-left:12px;
+  border-left:1px solid #22272f}
+.feats b{font-size:12px;font-weight:600;color:var(--fg)}
+.feats span{font-size:11.5px;color:#6b727c;line-height:1.5}
+#hero.ran .pitch{opacity:0;max-height:0;margin:0;overflow:hidden}
+@media(max-width:620px){.feats{grid-template-columns:1fr}}
+.sub{color:var(--mut);font-size:13px;margin:9px 0 0;text-align:center;
+  transition:opacity .3s ease,margin .45s ease,height .45s ease}
+#hero.ran .sub{opacity:0;height:0;margin:0;overflow:hidden}
+.searchwrap{width:100%;max-width:760px;margin:0 auto;transition:max-width .5s ease}
+#hero.ran .searchwrap{max-width:100%;margin:10px 0 0}
+.search{display:flex;align-items:center;gap:0;background:#13161a;border:1px solid var(--line);
+  border-radius:12px;padding:5px 5px 5px 16px;transition:border-color .2s,padding .35s ease}
+.search:focus-within{border-color:var(--acc)}
+#hero.ran .search{padding:3px 3px 3px 13px;border-radius:9px}
+.search input{flex:1;background:none;border:0;outline:none;color:var(--fg);
+  font:inherit;font-size:14.5px;padding:11px 0;min-width:0}
+#hero.ran .search input{font-size:13px;padding:7px 0}
+.search .div{width:1px;align-self:stretch;background:var(--line);margin:0 10px}
+.search select{background:none;border:0;outline:none;color:var(--mut);font:inherit;
+  font-size:12.5px;cursor:pointer;padding:4px 2px}
+.search select option{background:#13161a;color:var(--fg)}
+.search button{background:var(--acc);color:#0f1410;border:0;border-radius:8px;
+  padding:11px 20px;font:inherit;font-weight:650;font-size:13.5px;cursor:pointer}
+#hero.ran .search button{padding:7px 15px;font-size:12.5px}
+.search button:disabled{opacity:.45;cursor:not-allowed}
+.hint{color:var(--mut);font-size:11.5px;margin:10px auto 0;max-width:760px;text-align:center}
+#hero.ran .hint{display:none}
+
+/* ---- terminal ---- */
+#term{font-family:var(--mono);font-size:12.5px;line-height:1.9;margin:18px 0 4px}
+.ln{margin-top:2px}
+.ln{display:flex;gap:9px;opacity:0;animation:fade .25s ease forwards}
+.ln .p{color:var(--acc);flex:none}
+.ln .t{color:var(--mut)}
+.ln .t b{color:var(--fg);font-weight:600}
+.ln.done .t:after{content:' ok';color:var(--ok)}
+.ln.fail .t:after{content:' failed';color:var(--bad)}
+.dots:after{content:'';animation:dots 1.1s steps(4,end) infinite}
+@keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
+@keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+
+/* ---- output blocks: part of the stream, not cards ---- */
+.out{margin:6px 0 20px 17px;padding:2px 0 2px 16px;border-left:1px solid #1e232b;
+  opacity:0;animation:rise .35s cubic-bezier(.22,1,.36,1) forwards;font-family:var(--mono)}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.out .lbl{color:#5d646e;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+  margin:0 0 9px}
+.out .lbl i{font-style:normal;opacity:.65;text-transform:none;letter-spacing:0}
+/* sub-steps: one line per field as it lands */
+.slns{margin-bottom:4px}
+.sln{display:flex;align-items:baseline;gap:7px;font-size:12.5px;line-height:1.95;
+  opacity:0;animation:fade .2s ease forwards}
+.sln .sp{color:#4a515b;flex:none}
+.sln .k{color:#6b727c;flex:none}
+.sln .lead{flex:1;border-bottom:1px dotted #22272f;transform:translateY(-3px);min-width:14px}
+.sln .v{color:var(--fg);flex:none;max-width:62%;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.sln .v.pending{color:#4a515b}
+.sln .v.typing:after{content:'\2590';color:var(--acc);margin-left:1px;
+  animation:blink .85s steps(2,end) infinite}
+@keyframes blink{50%{opacity:0}}
+.sln .v.g{color:var(--ok)}.sln .v.r{color:var(--bad)}.sln .v.a{color:var(--acc)}
+
+input[type=number],select.f,button.f{font:inherit;font-size:13px;padding:8px 10px;
+  border-radius:8px;background:#13161a;color:var(--fg);border:1px solid var(--line)}
+input[type=number]{width:84px}
+button.f{cursor:pointer}button.f:hover:not(:disabled){border-color:var(--acc)}
+button.f:disabled{opacity:.4;cursor:not-allowed}
+button.fire{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:650}
+.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+code,.mono{font-family:var(--mono);font-size:11.5px}
+.kv{display:grid;grid-template-columns:132px 1fr;gap:3px 14px;font-size:12.5px}
+.kv div:nth-child(odd){color:#6b727c}
+.head{display:flex;gap:14px;align-items:flex-start}
+.pfp{width:58px;height:58px;border-radius:9px;background:#15181d;object-fit:cover;flex:none}
+.links{display:flex;gap:7px;margin-top:11px;flex-wrap:wrap}
+a.btn{padding:0;border:0;color:var(--acc);text-decoration:none;font-size:11.5px;
+  font-family:var(--mono);background:none;opacity:.85}
+a.btn:hover{opacity:1;text-decoration:underline}
+.links{gap:16px}
+.badges{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:11px}
+.badge{font-size:11px;font-family:var(--mono);font-weight:500;padding:0;background:none;
+  color:#6b727c}
+.badge:before{content:'['}.badge:after{content:']'}
+.badge.g{color:var(--ok)}.badge.r{color:var(--bad)}.badge.a{color:var(--acc)}
+.badges{gap:10px;margin-bottom:13px}
+.bar{height:3px;background:#1c2027;overflow:hidden;margin:9px 0 3px;max-width:460px}
+.bar>i{display:block;height:100%;background:var(--acc)}
+.big{font-size:23px;font-weight:650;font-variant-numeric:tabular-nums}
+.note{font-size:11.5px;color:#6b727c;margin-top:10px;line-height:1.6;max-width:680px}
+.ok{color:var(--ok)}.err{color:var(--bad)}.muted{color:var(--mut)}
+.lane{display:grid;grid-template-columns:62px 1fr 74px;gap:9px;align-items:center;
+  padding:3px 0;font-size:11.5px;font-family:var(--mono)}
+.lane .track{background:var(--panel2);border-radius:3px;height:13px}
+.lane .track>i{display:block;height:100%;border-radius:3px;background:#3a424e}
+.lane.win .track>i{background:var(--ok)}.lane.err .track>i{background:#4a3336}
+.verdict{padding:0 0 9px;font-weight:650;margin-bottom:6px;font-size:13px;font-family:var(--mono)}
+.verdict.y{color:var(--ok)}.verdict.n{color:var(--bad)}
+.chk{display:flex;gap:9px;align-items:baseline;padding:3px 0;font-size:12.5px;max-width:620px}
+.chk .m{width:14px;font-weight:700;flex:none}
+.stat{display:flex;flex-wrap:wrap;gap:4px 26px;margin-top:12px;font-size:12.5px}
+.stat div{display:flex;gap:8px;align-items:baseline}
+.stat b{font-variant-numeric:tabular-nums;font-weight:600}
+.stat span{font-size:11px;color:#6b727c}
+table.st{width:100%;border-collapse:collapse;font-size:12.5px}
+table.st{max-width:620px}
+table.st th{text-align:left;color:#5d646e;font-weight:500;font-size:11px;
+  padding:0 0 6px;border-bottom:1px solid #1e232b}
+table.st td{padding:4px 0;border-bottom:1px solid #15181d;font-variant-numeric:tabular-nums}
+table.st td:not(:first-child),table.st th:not(:first-child){text-align:right}
+.sum{padding:11px 0 0;margin-top:11px;border-top:1px solid #1e232b;font-size:12.5px;
+  color:#8d949f;max-width:680px;line-height:1.65}
+.sum b{color:var(--fg);font-weight:600}
+</style>
+<div class="wrap">
+  <div id="hero">
+    <h1><svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M6 23c2.6-8.5 6-12.8 10-12.8S23.4 14.5 26 23z" fill="none"
+            stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+      <path d="M16 10.2V5.6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+    </svg><span>Wasabi</span></h1>
+    <div class="sub">Sharp execution for OpenSea SeaDrop mints<span id="keyst"></span></div>
+    <div class="pitch">
+      <p>Paste a collection. Wasabi reads the drop straight off the contract — supply,
+         stages, per-wallet caps, and whether your wallet actually passes — then signs
+         offline and submits <b>direct to the sequencer</b>, skipping the public gateway
+         that costs most people half a second.</p>
+      <div class="feats">
+        <div><b>On-chain truth</b><span>Stage history rebuilt from mint events, not scraped from a page</span></div>
+        <div><b>Direct submit</b><span>Sequencer endpoint, measured 266ms against 934ms via the RPC</span></div>
+        <div><b>Signed up front</b><span>Nothing left in the hot path but a socket write</span></div>
+        <div><b>Honest checks</b><span>Eligibility read from getMintStats, with the reason it fails</span></div>
+      </div>
+    </div>
+    <div class="searchwrap">
+      <div class="search">
+        <input id="url" spellcheck="false"
+               placeholder="opensea.io/collection/… or a 0x contract address"
+               value="https://opensea.io/collection/ethmon">
+        <span class="div"></span>
+        <select id="chain" title="override the detected chain">
+          <option value="">auto</option><option>robinhood</option><option>ethereum</option>
+          <option>base</option><option>arbitrum</option><option>optimism</option><option>polygon</option>
+        </select>
+        <button id="go">Resolve</button>
+      </div>
+      <div class="hint">Collection URL or contract address — the chain is detected either way.
+        OpenSea supplies only the name, picture and floor; everything that decides a mint
+        is read from the contract.</div>
+    </div>
+  </div>
+  <div id="term"></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+const dt=t=>new Date(t*1000).toLocaleString();
+const j=async(u,o)=>{const r=await fetch(u,o);return r.json()};
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+let C=null,D=null,P=null,tick=null;
+
+function line(text){
+  const el=document.createElement('div');
+  el.className='ln';
+  el.innerHTML=`<span class="p">&gt;</span><span class="t">${text}<span class="dots"></span></span>`;
+  $('term').appendChild(el);
+  let block=null;
+  return {
+    ok(extra){el.className='ln done';const d=el.querySelector('.dots');if(d)d.remove();
+      if(extra)el.querySelector('.t').innerHTML+=` <b>${extra}</b>`;return this},
+    fail(msg){el.className='ln fail';const d=el.querySelector('.dots');if(d)d.remove();
+      if(msg)el.querySelector('.t').innerHTML+=` <span class="err">${esc(msg)}</span>`;return this},
+    // output belongs to the line that produced it, so it is inserted directly
+    // beneath rather than collected into a separate column of cards
+    out(label,html,sub){
+      block=document.createElement('div');
+      block.className='out';
+      block.innerHTML=(label?`<div class="lbl">${label}${sub?` <i>— ${sub}</i>`:''}</div>`:'')+html;
+      el.after(block);
+      return block;
+    }
+  };
+}
+
+function countdown(){
+  if(!D||!D.publicDrop||!$('cd'))return;
+  const p=D.publicDrop,now=Math.floor(Date.now()/1000);
+  let label,cls,target;
+  if(now<p.start){label='opens in';cls='a';target=p.start}
+  else if(now<p.end){label='closes in';cls='g';target=p.end}
+  else{$('cd').innerHTML='';clearInterval(tick);return}
+  let s=target-now;const d=Math.floor(s/86400);s-=d*86400;
+  const h=Math.floor(s/3600);s-=h*3600;const m=Math.floor(s/60);s-=m*60;
+  $('cd').innerHTML=`<span class="muted" style="font-size:11.5px">${label}</span>
+    <div class="big">${d}d ${String(h).padStart(2,'0')}h ${String(m).padStart(2,'0')}m ${String(s).padStart(2,'0')}s</div>`;
+}
+
+function latencySummary(b){
+  if(!b.warm)return'';
+  const w=b.warm,c=b.cold,s=[...b.samples].sort((a,x)=>a-x);
+  const best=s[Math.max(0,Math.floor(s.length/9))];     // ~ best of 8 draws
+  const gain=Math.max(0,w.med-best);
+  const hand=c?Math.max(0,c.med-w.med):0;
+  const spread=w.max-w.min;
+  const bound=hand<spread*0.4;
+  return `<div class="sum">
+    <b>${bound?'Backend-bound.':'Handshake-bound.'}</b>
+    Reusing a connection saves about <b>${hand}ms</b>, but samples swing <b>${spread}ms</b>
+    on identical requests — ${bound
+      ? 'so the delay is their server, not your network, and being physically closer buys little.'
+      : 'so pre-warming connections is the main win here.'}
+    <br><br>Each lane is an independent draw from that spread. Firing <b>8 lanes</b> should land
+    near <b>${best}ms</b> instead of the <b>${w.med}ms</b> median — roughly <b>${gain}ms earlier</b>,
+    about ${Math.max(1,Math.round(gain/101))} block${gain>150?'s':''} on this chain.
+    ${gain<60?'<br><br>That margin is small; it only matters against live competition.':''}
+  </div>`;
+}
+
+// Values arrive a character at a time behind a block cursor. The markup is
+// typed as its plain text first, then swapped for the real HTML once complete,
+// so mono spans and links survive without being typed as tags.
+const plain=h=>{const d=document.createElement('div');d.innerHTML=h;return d.textContent};
+
+async function typeInto(el,html,cls,budget=240){
+  const txt=plain(html);
+  // long values type faster so every field costs about the same wall time
+  const per=Math.max(4,Math.min(26,budget/Math.max(1,txt.length)));
+  el.className='v typing';
+  el.textContent='';
+  for(let i=1;i<=txt.length;i++){
+    el.textContent=txt.slice(0,i);
+    await wait(per);
+  }
+  el.className='v'+(cls?' '+cls:'');
+  el.innerHTML=html;
+}
+
+// Emit one sub-line per field: the label lands, the value types out.
+async function rows(host,items,delay=55){
+  for(const it of items){
+    if(!it)continue;
+    const [k,v,cls]=it;
+    const el=document.createElement('div');
+    el.className='sln';
+    el.innerHTML=`<span class="sp">&gt;</span><span class="k">grab ${esc(k)}</span>`+
+      `<span class="lead"></span><span class="v pending"><span class="dots"></span></span>`;
+    host.appendChild(el);
+    await wait(delay);
+    await typeInto(el.querySelector('.v'),v,cls);
+  }
+}
+
+async function run(){
+  $('go').disabled=true;
+  $('hero').classList.add('ran');
+  $('term').innerHTML='';
+  C=D=P=null; clearInterval(tick);
+  await wait(420);
+
+  // 1 — resolve
+  let L=line(`resolving <b>${esc($('url').value)}</b>`);
+  C=await j('/api/resolve?url='+encodeURIComponent($('url').value));
+  if(C.error){L.fail(C.error);$('go').disabled=false;return}
+  if($('chain').value)C.chain=$('chain').value;
+  L.ok(`${C.name||C.contract.slice(0,10)+'…'} on ${C.chain}`);
+  const Lc=L;
+  const cBlk=Lc.out('collection','<div class="slns"></div>');
+  await rows(cBlk.querySelector('.slns'),[
+    C.name?['name',esc(C.name)]:null,
+    ['contract',`<span class="mono">${esc(C.contract)}</span>`],
+    ['chain',esc(C.chain),'a'],
+    C.owner?['creator',`<span class="mono">${esc(C.owner)}</span>`]:null,
+    ['source',C.via==='address'?'contract address':C.via==='cache'?'local cache':'OpenSea API'],
+    C.chainCandidates&&C.chainCandidates.length>1
+      ?['also on',esc(C.chainCandidates.join(', ')),'r']:null,
+  ]);
+  const osUrl=C.slug?`https://opensea.io/collection/${C.slug}`
+    :`https://opensea.io/assets/${C.chain==='polygon'?'matic':C.chain}/${C.contract}`;
+  cBlk.insertAdjacentHTML('beforeend',`<div class="head" style="margin-top:10px">
+    <img class="pfp" src="${C.image||''}" alt="" onerror="this.style.visibility='hidden'">
+    <div style="flex:1"><div class="links" style="margin-top:0">
+      <a class="btn" target="_blank" rel="noopener" href="${osUrl}">OpenSea ↗</a>
+      <a class="btn" target="_blank" rel="noopener" id="expl" href="#">Explorer ↗</a>
+      ${C.site?`<a class="btn" target="_blank" rel="noopener" href="${esc(C.site)}">Website ↗</a>`:''}
+    </div></div></div><div id="mkt"></div>`);
+  await wait(260);
+
+  // 2 — drop
+  L=line(`reading drop from <b>${esc(C.chain)}</b>`);
+  D=await j(`/api/drop?contract=${C.contract}&chain=${C.chain}`);
+  if(D.error){L.fail(D.error);$('go').disabled=false;return}
+  const p=D.publicDrop,sup=+D.totalSupply||0,max=+D.maxSupply||0;
+  const noStage=!p||(p.start===0&&p.end===0);
+  L.ok(noStage?'no SeaDrop stage':`${sup.toLocaleString()}/${max.toLocaleString()} minted`);
+  if(noStage){
+    L.out('drop',`<div class="err"><b>No SeaDrop stage on this contract.</b></div>
+      <div class="note">${D.name?`It reads as <b>${esc(D.name)}</b>, so the contract exists — but `:''}
+      SeaDrop has no public drop configured. Either it is not a SeaDrop collection
+      (Manifold, thirdweb, a custom minter) or the drop was never set up.
+      This console reads and mints SeaDrop 1.0 ERC-721 drops only.</div>`);
+  } else {
+    const left=max-sup,ended=Date.now()/1000>=p.end,soldout=max>0&&left<=0;
+    const dBlk=L.out('drop','<div class="slns"></div>');
+    const al=D.allowListRoot&&/[1-9a-f]/.test(D.allowListRoot.slice(2));
+    await rows(dBlk.querySelector('.slns'),[
+      ['totalSupply',`${sup.toLocaleString()} / ${max.toLocaleString()}`,soldout?'r':''],
+      ['price',p.price===0?'free':(p.price/1e18).toFixed(6)+' ETH',p.price===0?'g':'a'],
+      ['perWallet',String(p.perWallet)],
+      ['window',`${dt(p.start)} → ${dt(p.end)}`,ended?'r':'g'],
+      ['feeRecipients',p.restrictFeeRecipients?'restricted':'open'],
+      ['allowListRoot',al?`<span class="mono">${esc(D.allowListRoot.slice(0,22))}…</span>`:'none'],
+      ['signers',D.signers&&D.signers!=='[]'?'1 configured':'none'],
+      ['creatorPayout',`<span class="mono">${esc(D.creatorPayout||'—')}</span>`],
+      ['royaltyInfo',D.royalty?(D.royalty.bps
+        ?`${D.royalty.bps/100}% → <span class="mono">${esc(D.royalty.receiver.slice(0,12))}…</span>`
+        :'not set on-chain'):'—',D.royalty&&D.royalty.bps?'':'r'],
+      ['baseURI',`<span class="mono">${esc((D.baseURI||'—').slice(0,46))}${(D.baseURI||'').length>46?'…':''}</span>`],
+    ]);
+    dBlk.insertAdjacentHTML('beforeend',`<div style="margin-top:12px"><div class="badges">
+      <span class="badge">${max.toLocaleString()} supply</span>
+      ${soldout?'<span class="badge r">sold out</span>'
+        :`<span class="badge g">${left.toLocaleString()} left</span>`}
+      ${ended?'<span class="badge r">mint ended</span>'
+        :(Date.now()/1000<p.start?'<span class="badge a">starts soon</span>'
+          :'<span class="badge g">live</span>')}
+      ${p.price===0?'<span class="badge g">free</span>'
+        :`<span class="badge a">${(p.price/1e18).toFixed(6)} ETH</span>`}
+      ${D.royalty&&D.royalty.bps?`<span class="badge">${D.royalty.bps/100}% creator fee</span>`
+        :'<span class="badge r">no royalty set</span>'}
+      ${D.signers&&D.signers!=='[]'?'<span class="badge">signed stage</span>':''}
+      ${D.allowListRoot&&/[1-9a-f]/.test(D.allowListRoot.slice(2))?'<span class="badge">allowlist</span>':''}
+    </div><div id="cd"></div>
+    <div class="bar"><i style="width:${max?Math.min(100,100*sup/max):0}%"></i></div>
+    <div class="muted" style="font-size:11.5px">${sup.toLocaleString()} / ${max.toLocaleString()} minted</div></div>`);
+    clearInterval(tick);countdown();tick=setInterval(countdown,1000);
+  }
+  if($('expl')&&D.explorer)$('expl').href=`${D.explorer}/address/${D.contract}`;
+
+  // market, into the collection panel
+  if(C.slug){
+    const mk=await j('/api/market?slug='+encodeURIComponent(C.slug));
+    if($('mkt'))$('mkt').innerHTML=mk.unavailable?''
+      :`<div class="stat" style="margin-top:13px">
+        <div><b>${mk.floor??'—'}</b><span>floor ${esc(mk.floorSymbol||'')}</span></div>
+        <div><b>${mk.volume??'—'}</b><span>volume</span></div>
+        <div><b>${mk.sales??'—'}</b><span>sales</span></div>
+        <div><b>${mk.owners??'—'}</b><span>owners</span></div></div>
+      <div class="stat" style="margin-top:8px">
+        <div><b>${mk.bestListing!=null?mk.bestListing.toFixed(4):'—'}</b><span>best listing</span></div>
+        <div><b>${mk.volume24h??'—'}</b><span>24h volume</span></div>
+        <div><b>${mk.sales24h??'—'}</b><span>24h sales</span></div>
+        <div><b>${mk.listingCount??'—'}</b><span>listings</span></div></div>`;
+  }
+  await wait(260);
+
+  // 3 — latency
+  L=line('benchmarking rpc <span class="muted">(12 warm + 6 cold)</span>');
+  const b=await j('/api/bench?rpc='+encodeURIComponent(D.rpc)+'&n=12');
+  if(b.error){L.fail(b.error)}
+  else{
+    L.ok(`median ${b.warm?b.warm.med:'?'}ms`);
+    const mx=Math.max(...b.samples,1);
+    const rBlk=L.out('rpc latency','<div class="slns"></div>','min / median / max');
+    await rows(rBlk.querySelector('.slns'),[
+      ['warm conn',b.warm?`${b.warm.min} / <b>${b.warm.med}</b> / ${b.warm.max} ms`:'—'],
+      ['cold conn',b.cold?`${b.cold.min} / <b>${b.cold.med}</b> / ${b.cold.max} ms`:'—'],
+      ['samples',`${b.samples.length} requests`],
+    ]);
+    rBlk.insertAdjacentHTML('beforeend',`<div style="margin-top:10px">${b.samples.map(s=>
+        `<div class="lane"><span class="muted">${s}ms</span>
+         <span class="track"><i style="width:${100*s/mx}%"></i></span><span></span></div>`).join('')}
+      </div>${latencySummary(b)}`);
+  }
+  // 3b — write path
+  L=line('timing the write path <span class="muted">(sequencer vs public rpc)</span>');
+  const sb=await j(`/api/submitbench?rpc=${encodeURIComponent(D.rpc)}&chain=${C.chain}&n=10`);
+  if(sb.error||!sb.publicRpc){L.fail(sb.error||'unavailable')}
+  else{
+    const pr=sb.publicRpc,sq=sb.sequencer,tcp=sb.tcp;
+    L.ok(sq?`sequencer ${sq.med}ms vs rpc ${pr.med}ms`:`${pr.med}ms`);
+    const wBlk=L.out('write path','<div class="slns"></div>',
+      sq?'direct submission bypasses the gateway':'no direct endpoint on this chain');
+    await rows(wBlk.querySelector('.slns'),[
+      ['publicRpc',`${pr.min} / <b>${pr.med}</b> / ${pr.max} ms &nbsp;<span class="muted">spread ${pr.spread}</span>`,'r'],
+      sq?['sequencer',`${sq.min} / <b>${sq.med}</b> / ${sq.max} ms &nbsp;<span class="muted">spread ${sq.spread}</span>`,'g']:null,
+      tcp?['tcp handshake',`${tcp.med} ms to ${tcp.ip}`,'a']:null,
+    ]);
+    if(sq){
+      const saved=pr.med-sq.med, phys=tcp?tcp.med:0, proc=Math.max(0,sq.med-phys);
+      wBlk.insertAdjacentHTML('beforeend',`<div class="sum">
+        <b>Submitting straight to the sequencer saves ${saved}ms</b> — ${Math.round(100*(1-sq.med/pr.med))}%
+        of the round trip — and collapses the spread from <b>${pr.spread}ms</b> to <b>${sq.spread}ms</b>.
+        The public RPC adds Cloudflare and a gateway in front of the same sequencer; on an Orbit
+        chain that is pure cost on the write path.
+        ${phys?`<br><br>Of the remaining <b>${sq.med}ms</b>, about <b>${phys}ms</b> is the TCP round trip
+        to <span class="mono">${esc(tcp.ip)}</span> and only <b>~${proc}ms</b> is the sequencer itself.
+        That is distance, not software — you are at the floor from here. Running this from a box in
+        the sequencer's own region would cut it to roughly <b>10-20ms</b>.`:''}
+        <br><br>With an ${sq.spread}ms spread there is almost nothing left for extra lanes to win;
+        2-3 are worth keeping for packet loss, not for speed.</div>`);
+    }
+  }
+  await wait(260);
+
+  // 4 — stage history
+  L=line('scanning SeaDropMint events <span class="muted">(this one is slow)</span>');
+  const r=await j(`/api/stages?contract=${C.contract}&chain=${C.chain}`);
+  if(r.error){L.fail(r.error)}
+  else if(!r.stages.length){L.ok('no mints found')}
+  else{
+    L.ok(`${r.stages.length} stages, ${r.totalTokens.toLocaleString()} tokens`);
+    const tot=r.totalTokens;
+    const sBlk=L.out('stage activity','<div class="slns"></div>','rebuilt from on-chain mint events');
+    await rows(sBlk.querySelector('.slns'),
+      r.stages.map(x=>[`stage #${x.stage}`,
+        `${x.tokens.toLocaleString()} tokens · ${x.wallets.toLocaleString()} wallets · ${
+          x.price===0?'free':(x.price/1e18).toFixed(6)+' ETH'}`,x.price===0?'g':'a']),80);
+    sBlk.insertAdjacentHTML('beforeend',`<div style="margin-top:12px"><table class="st">
+      <tr><th>stage</th><th>txs</th><th>tokens</th><th>wallets</th><th>price</th><th>share</th></tr>
+      ${r.stages.map(s=>`<tr><td>#${s.stage}${s.stage===0?' <span class="muted">(public)</span>':''}</td>
+        <td>${s.txs.toLocaleString()}</td><td><b>${s.tokens.toLocaleString()}</b></td>
+        <td>${s.wallets.toLocaleString()}</td>
+        <td>${s.price===0?'<span class="ok">free</span>':(s.price/1e18).toFixed(6)+' ETH'}</td>
+        <td>${tot?(100*s.tokens/tot).toFixed(1):0}%</td></tr>`).join('')}
+      <tr><td><b>total</b></td><td><b>${r.totalTxs.toLocaleString()}</b></td>
+        <td><b>${tot.toLocaleString()}</b></td><td></td><td></td><td></td></tr></table>
+      <div class="note">Stage indices are what the contract records. OpenSea's names
+        (Team, Pre-sale, GTD) live in their database, not on chain, and there is no public
+        API for them — but every row here is reconstructed from real mint events, so the
+        counts are exact rather than reported.</div></div>`);
+  }
+  await wait(260);
+
+  // 5 — mint, waits for the operator
+  const Lm=line('ready — mint needs your confirmation').ok();
+  const w=await j('/api/wallets');
+  Lm.out('mint',`<div class="row">
+      <select class="f" id="acct">${(w.accounts||[]).map(a=>`<option>${esc(a)}</option>`).join('')
+        ||'<option value="">no keystores found</option>'}</select>
+      <label class="muted" style="font-size:12px">qty <input type="number" id="qty" value="${
+        D.publicDrop?Math.min(10,D.publicDrop.perWallet||10):10}" min="1"></label>
+      <label class="muted" style="font-size:12px">lanes <input type="number" id="lanes" value="3" min="1" max="24"></label>
+      <label class="muted" style="font-size:12px"><input type="checkbox" id="atstart" style="width:auto"> fire at stage open</label>
+      <button class="f" id="prep">Prepare &amp; sign</button>
+      <button class="f fire" id="fireb" disabled>Fire</button>
+    </div>
+    <div id="elig" style="margin-top:12px"></div>
+    <div id="prepout" style="margin-top:12px" class="note">Prepare signs offline — one Touch ID
+      prompt in the terminal running the server. Firing is then only a socket write.</div>
+    <div id="fireout" style="margin-top:10px"></div>
+
+    <div style="margin-top:22px;padding-top:15px;border-top:1px solid #1e232b">
+      <div class="lbl" style="margin-bottom:9px">batch — one mint per wallet</div>
+      <div class="row">
+        <input id="bpath" class="f" style="flex:1;min-width:300px"
+               placeholder="wallets/your-wallets.txt — address + private key per wallet"
+               value="wallets/sheers-wallets-200-20261001-0632.txt">
+        <label class="muted" style="font-size:12px">each <input type="number" id="bqty" value="10" min="1"></label>
+        <button class="f" id="bcheck">Check wallets</button>
+        <button class="f" id="bprep" disabled>Sign all</button>
+        <button class="f fire" id="bfire" disabled>Fire all</button>
+      </div>
+      <div id="bout" style="margin-top:11px"></div>
+      <div class="note">Each wallet mints its own allowance — one transaction per wallet,
+        own nonce, all submitted together. Keys are read from the file inside the server
+        and never sent to this page. Use this where every wallet is a different person;
+        the per-wallet cap is the project's way of spreading supply.</div>
+    </div>`);
+  bindMint();
+  checkElig();
+  $('go').disabled=false;
+}
+
+async function checkElig(){
+  if(!D||!D.publicDrop||!$('acct'))return;
+  const w=await j('/api/address?account='+encodeURIComponent($('acct').value));
+  if(!w.address){$('elig').innerHTML='';return}
+  $('elig').innerHTML='<span class="muted">checking eligibility…</span>';
+  const e=await j(`/api/eligibility?contract=${C.contract}&chain=${C.chain}`+
+                  `&wallet=${w.address}&qty=${+$('qty').value}`);
+  if(e.error){$('elig').innerHTML=`<span class="err">${esc(e.error)}</span>`;return}
+  $('elig').innerHTML=`<div class="verdict ${e.canMint?'y':'n'}">${e.canMint
+      ? `PASS — this wallet can mint ${e.qty} now`
+      : `FAIL — cannot mint ${e.qty} right now`}${e.maxNow!=null
+      ? ` <span style="font-weight:400;opacity:.8">(max available: ${e.maxNow})</span>`:''}</div>
+    ${e.checks.map(c=>`<div class="chk"><span class="m ${c.ok?'ok':'err'}">${c.ok?'✓':'✗'}</span>
+      <span style="flex:1">${esc(c.label)}</span>
+      <span class="muted" style="font-size:11.5px">${esc(c.detail||'')}</span></div>`).join('')}
+    <div class="note">Checked against <span class="mono">${esc(w.address)}</span>.
+      The cap counts tokens minted, not tokens held — transferring them away does not
+      free the allowance.</div>`;
+}
+
+let BP=null;
+function bindBatch(){
+  $('bcheck').onclick=async()=>{
+    $('bout').innerHTML='<span class="muted">reading wallets and checking allowances…</span>';
+    const r=await j(`/api/batch/preflight?path=${encodeURIComponent($('bpath').value)}`+
+      `&contract=${C.contract}&chain=${C.chain}&qty=${+$('bqty').value}`);
+    if(r.error){$('bout').innerHTML=`<span class="err">${esc(r.error)}</span>`;return}
+    $('bout').innerHTML=`<div class="verdict ${r.ready?'y':'n'}">${r.ready} of ${r.count}
+        wallets ready — ${r.totalTokens} tokens</div>
+      <table class="st" style="max-width:720px"><tr><th>wallet</th><th>gas</th>
+        <th>minted</th><th>room</th><th>will take</th></tr>
+      ${r.wallets.map(w=>`<tr>
+        <td class="mono">${esc(w.address.slice(0,12))}…</td>
+        <td class="${w.gas?'ok':'err'}">${w.balanceEth.toFixed(6)}</td>
+        <td>${w.minted}</td><td>${w.room}</td>
+        <td class="${w.ready?'ok':'err'}"><b>${w.ready?w.want:'—'}</b></td></tr>`).join('')}
+      </table>${r.wallets.some(w=>!w.gas)
+        ? '<div class="note err">Wallets with no gas cannot mint. Fund them first.</div>':''}`;
+    $('bprep').disabled=!r.ready;
+  };
+  $('bprep').onclick=async()=>{
+    $('bout').insertAdjacentHTML('beforeend','<div class="note" id="bsign">signing each wallet…</div>');
+    BP=await j('/api/batch/prepare',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({path:$('bpath').value,contract:C.contract,chain:C.chain,qty:+$('bqty').value})});
+    if(BP.error){$('bsign').outerHTML=`<div class="note err">${esc(BP.error)}</div>`;return}
+    $('bsign').outerHTML=`<div class="note ok">Signed ${BP.count} transactions — ${BP.tokens} tokens total.
+      ${BP.errors.length?`<span class="err">${BP.errors.length} skipped: ${
+        esc(BP.errors.map(e=>e.address.slice(0,10)+' ('+e.why+')').join(', '))}</span>`:''}</div>`;
+    $('bfire').disabled=BP.count===0;
+  };
+  $('bfire').onclick=async()=>{
+    const at=$('atstart').checked&&D.publicDrop?D.publicDrop.start:null;
+    $('bout').insertAdjacentHTML('beforeend',
+      `<div class="note" id="bfo">${at?'armed — waiting for stage open…':'firing all…'}</div>`);
+    const r=await j('/api/batch/fire',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({rpc:BP.rpc,items:BP.signed,at,chain:C.chain})});
+    if(r.error){$('bfo').outerHTML=`<div class="note err">${esc(r.error)}</div>`;return}
+    $('bfo').outerHTML=`<div class="verdict ${r.landed?'y':'n'}">${r.landed} of ${BP.count}
+        landed — ${r.tokens} tokens</div>
+      <table class="st" style="max-width:720px"><tr><th>wallet</th><th>qty</th><th>ms</th><th>result</th></tr>
+      ${r.results.map(x=>`<tr><td class="mono">${esc(x.address.slice(0,12))}…</td>
+        <td>${x.qty}</td><td>${x.ms??'—'}</td>
+        <td class="${x.result?'ok':'err'}">${x.result
+          ?esc(x.result.slice(0,18))+'…':esc((x.error||'failed').slice(0,46))}</td></tr>`).join('')}
+      </table><div class="note">Submitted to <span class="mono">${esc(r.target)}</span>.</div>`;
+  };
+}
+
+function bindMint(){
+  $('acct').onchange=checkElig; $('qty').onchange=checkElig;
+  bindBatch();
+  $('prep').onclick=async()=>{
+    $('prepout').innerHTML='<span class="muted">signing — Touch ID prompt is in the server terminal…</span>';
+    P=await j('/api/prepare',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({contract:C.contract,chain:C.chain,qty:+$('qty').value,account:$('acct').value})});
+    if(P.error){$('prepout').innerHTML=`<span class="err">${esc(P.error)}</span>`;$('fireb').disabled=true;return}
+    $('prepout').innerHTML=`<div class="kv">
+        <div>from</div><div class="mono">${esc(P.from)}</div>
+        <div>nonce</div><div>${P.nonce}</div>
+        <div>quantity</div><div>${P.qty}</div>
+        <div>tx hash</div><div class="mono">${esc(P.txHash)}</div>
+        <div>signed</div><div class="muted">${P.raw.length/2-1} bytes ready</div>
+      </div><div class="note ok">Signed. Firing now costs one socket write per lane.</div>`;
+    $('fireb').disabled=false;
+  };
+  $('fireb').onclick=async()=>{
+    const at=$('atstart').checked&&D.publicDrop?D.publicDrop.start:null;
+    $('fireout').innerHTML=`<span class="muted">${at?'armed — waiting for stage open…':'firing…'}</span>`;
+    const r=await j('/api/fire',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({rpc:P.rpc,raw:P.raw,lanes:+$('lanes').value,at,chain:C.chain})});
+    if(r.error){$('fireout').innerHTML=`<span class="err">${esc(r.error)}</span>`;return}
+    const mx=Math.max(...r.results.map(x=>x.ms),1);
+    $('fireout').innerHTML=`${r.direct?`<div class="note" style="margin:0 0 7px">submitted direct to
+        <span class="mono">${esc(r.target)}</span> — sequencer direct, no gateway</div>`:''}
+      <div style="margin-bottom:8px">${r.txHash
+        ?`<span class="ok"><b>landed</b></span> <span class="mono">${esc(r.txHash)}</span>`
+        :'<span class="err"><b>no lane accepted it</b></span>'}</div>
+      ${r.results.map(x=>`<div class="lane ${x.result?'win':(x.error?'err':'')}">
+        <span class="muted">lane ${x.lane}</span>
+        <span class="track"><i style="width:${100*x.ms/mx}%"></i></span>
+        <span style="text-align:right">${x.ms}ms</span></div>
+        ${x.error?`<div class="note err" style="margin:0 0 3px 71px">${esc(x.error)}</div>`:''}`).join('')}
+      <div class="note">Every lane carries the same signed bytes, so only one can be included —
+        the others report the duplicate. That is the design, not a failure.</div>`;
+  };
+}
+
+$('go').onclick=run;
+$('url').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
+(async()=>{
+  const k=await j('/api/key');
+  $('keyst').innerHTML=k.have
+    ?`<span class="badge g" style="margin-left:6px">key ${k.source==='env'?'env':'auto'}</span>`
+    :'<span class="badge r" style="margin-left:6px">no key</span>';
+  if(k.have&&k.expires)$('keyst').title=`${k.name} — expires ${k.expires}`;
+})();
+</script>

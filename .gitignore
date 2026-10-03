@@ -1,0 +1,17 @@
+# Live credentials — never commit
+apikey.json
+.env
+.env.*
+*.key
+*.pem
+
+# Wallet material. Nothing with a private key belongs in this repo.
+wallets/
+*wallet*.txt
+*-addresses.txt
+
+# Local editor/OS noise
+*.bak
+__pycache__/
+*.pyc
+.DS_Store
