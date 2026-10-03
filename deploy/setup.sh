@@ -16,12 +16,20 @@ set -euo pipefail
 : "${EMAIL:?set EMAIL=you@example.com for certbot}"
 APP_DIR=${APP_DIR:-/opt/wasabi}
 
+# A freshly registered domain can take up to an hour to appear at the registry,
+# so provisioning is allowed to run ahead of DNS: SKIP_TLS=1 does everything
+# except certbot, and the script can be re-run later to finish the job.
+SKIP_TLS=${SKIP_TLS:-0}
 echo "==> checking DNS"
-getent hosts "$DOMAIN" >/dev/null || {
-  echo "STOP: $DOMAIN does not resolve. Add the A record first --" >&2
-  echo "      certbot cannot issue a certificate until it does." >&2
+if getent hosts "$DOMAIN" >/dev/null; then
+  echo "    $DOMAIN resolves"
+elif [ "$SKIP_TLS" = "1" ]; then
+  echo "    $DOMAIN does not resolve yet — provisioning without TLS"
+else
+  echo "STOP: $DOMAIN does not resolve. Add the A record first, or re-run with" >&2
+  echo "      SKIP_TLS=1 to provision now and issue the certificate later." >&2
   exit 1
-}
+fi
 
 echo "==> packages"
 apt-get update -qq
@@ -112,7 +120,19 @@ ln -sf /etc/nginx/sites-available/wasabi /etc/nginx/sites-enabled/wasabi
 rm -f /etc/nginx/sites-enabled/default
 
 echo "==> certificate"
-certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect
+if [ "$SKIP_TLS" = "1" ] && ! getent hosts "$DOMAIN" >/dev/null; then
+  # nginx will not start with ssl_certificate paths that do not exist yet
+  sed -i '/listen 443 ssl/,$d' /etc/nginx/sites-available/wasabi
+  printf '%s\n' 'server { listen 443 ssl http2; server_name '"$DOMAIN"'; return 503; }' \
+    > /dev/null   # placeholder intentionally omitted; port 80 only until certbot runs
+  sed -i 's#location / { return 301 https://\$host\$request_uri; }#location / { proxy_pass http://127.0.0.1:8899; proxy_set_header Host $host; }#' \
+    /etc/nginx/sites-available/wasabi
+  echo "    deferred — re-run this script without SKIP_TLS once DNS resolves"
+else
+  certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN" --non-interactive --agree-tos \
+    -m "$EMAIL" --redirect || \
+  certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect
+fi
 nginx -t && systemctl reload nginx
 
 echo "==> firewall"
