@@ -500,60 +500,60 @@ async function run(push=true){
   const Lm=line('ready — mint needs your confirmation').ok();
   let ME={}; try{ ME=await j('/auth/me'); }catch(e){}
   const w = ME.owner ? await j('/api/wallets') : {accounts:[]};
-  Lm.out('mint', (ME.owner ? `<div class="row">
-      <select class="f" id="acct">${(w.accounts||[]).map(a=>`<option>${esc(a)}</option>`).join('')
-        ||'<option value="">no keystores found</option>'}</select>
-      <label class="muted" style="font-size:12px">qty <input type="number" id="qty" value="${
-        D.publicDrop?Math.min(10,D.publicDrop.perWallet||10):10}" min="1"></label>
-      <label class="muted" style="font-size:12px">lanes <input type="number" id="lanes" value="3" min="1" max="24"></label>
-      <label class="muted" style="font-size:12px"><input type="checkbox" id="atstart" style="width:auto"> fire at stage open</label>
-      <button class="f" id="prep">Prepare &amp; sign</button>
-      <button class="f fire" id="fireb" disabled>Fire</button>
+  Lm.out('mint', `
+    <div class="row">
+      <button class="f pri" id="wConnect">Connect wallet</button>
+      <button class="f" id="wKey">Add by private key</button>
+      <span class="muted" style="font-size:12px">add the wallets you want to mint with</span>
     </div>
-    <div id="elig" style="margin-top:12px"></div>
-
-
-    <div id="prepout" style="margin-top:12px" class="note">Prepare signs offline — one Touch ID
-      prompt in the terminal running the server. Firing is then only a socket write.</div>
-    <div id="fireout" style="margin-top:10px"></div>
-
-    <div style="margin-top:22px;padding-top:15px;border-top:1px solid #1e232b">
-      <div class="lbl" style="margin-bottom:9px">batch — one mint per wallet</div>
-      <div class="row">
-        <input id="bpath" class="f" style="flex:1;min-width:300px"
-               placeholder="wallets/your-wallets.txt — address + private key per wallet"
-               value="wallets/sheers-wallets-200-20261001-0632.txt">
-        <label class="muted" style="font-size:12px">each <input type="number" id="bqty" value="10" min="1"></label>
-        <button class="f" id="bcheck">Check wallets</button>
-        <button class="f" id="bprep" disabled>Sign all</button>
-        <button class="f fire" id="bfire" disabled>Fire all</button>
-      </div>
-      <div id="bout" style="margin-top:11px"></div>
-      <div class="note">Each wallet mints its own allowance — one transaction per wallet,
-        own nonce, all submitted together. Keys are read from the file inside the server
-        and never sent to this page. Use this where every wallet is a different person;
-        the per-wallet cap is the project's way of spreading supply.</div>
-    </div>` : '') + `
-    <div id="elig2"></div>
-    <div style="margin-top:20px;padding-top:15px;border-top:1px solid #1e232b">
-      <div class="lbl" style="margin-bottom:9px">sign in your browser
-        <i>— your key never leaves this tab</i></div>
-      <div class="row">
-        <button class="f" id="connect">Connect wallet</button>
-        <span class="muted" style="font-size:12px">or</span>
-        <label class="muted" style="font-size:12px">qty each
-          <input type="number" id="bq" value="10" min="1"></label>
-        <button class="f fire" id="bsend">Sign &amp; relay</button>
-      </div>
+    <div id="wkeybox" class="hidden" style="margin-top:9px">
       <textarea id="pk" class="f" spellcheck="false" autocomplete="off"
-        style="width:100%;min-height:76px;margin-top:9px;font-family:var(--mono);font-size:11.5px"
-        placeholder="your private keys — one per line. They stay in this tab and are never sent to the server."></textarea>
-      <div id="bsout" style="margin-top:11px"></div>
-      <div class="note">Signing happens here, in your browser. Only the finished signed
-        transaction is posted to this server, which exists to put it in front of the
-        sequencer from <b>~19ms</b> away instead of ~264ms. The server has no way to
-        read your key, so it cannot spend anything of yours.</div>
-    </div>`);
+        style="width:100%;min-height:68px;font-family:var(--mono);font-size:11.5px"
+        placeholder="paste one or more private keys, one per line"></textarea>
+      <div class="row" style="margin-top:7px">
+        <button class="f" id="pkAdd">Add these</button>
+        <span class="muted" style="font-size:11.5px">kept in this tab only — never sent to the server</span>
+      </div>
+    </div>
+    <div id="wlist" style="margin-top:12px"></div>
+    <div class="row hidden" id="mintrow" style="margin-top:13px">
+      <label class="muted" style="font-size:12px">mint
+        <input type="number" id="bq" value="${D.publicDrop?Math.min(10,D.publicDrop.perWallet||10):10}" min="1"></label>
+      <span class="muted" style="font-size:12px">each</span>
+      <label class="muted" style="font-size:12px">
+        <input type="checkbox" id="atstart" style="width:auto"> wait for stage open</label>
+      <button class="f fire" id="bsend">Mint</button>
+    </div>
+    <div id="bsout" style="margin-top:11px"></div>
+    <div class="note">Signing happens in your browser. Only the finished signed
+      transaction reaches this server, which sits <b>~19ms</b> from the sequencer
+      instead of the ~264ms a typical connection costs. It cannot read your key.</div>
+    ${ME.owner ? `
+    <details style="margin-top:18px">
+      <summary style="cursor:pointer;color:#6b727c;font-size:11.5px;font-family:var(--mono)">
+        advanced — wallets stored on this server (owner only)</summary>
+      <div style="margin-top:12px">
+        <div class="row">
+          <select class="f" id="acct">${(w.accounts||[]).map(a=>`<option>${esc(a)}</option>`).join('')
+            ||'<option value="">no keystores found</option>'}</select>
+          <label class="muted" style="font-size:12px">qty <input type="number" id="qty" value="10" min="1"></label>
+          <button class="f" id="prep">Prepare &amp; sign</button>
+          <button class="f fire" id="fireb" disabled>Fire</button>
+        </div>
+        <div id="elig" style="margin-top:10px"></div>
+        <div id="prepout" style="margin-top:10px" class="note"></div>
+        <div id="fireout" style="margin-top:8px"></div>
+        <div class="row" style="margin-top:14px">
+          <input id="bpath" class="f" style="flex:1;min-width:280px"
+                 placeholder="wallets/file.txt on the server" value="">
+          <label class="muted" style="font-size:12px">each <input type="number" id="bqty" value="10" min="1"></label>
+          <button class="f" id="bcheck">Check</button>
+          <button class="f" id="bprep" disabled>Sign all</button>
+          <button class="f fire" id="bfire" disabled>Fire all</button>
+        </div>
+        <div id="bout" style="margin-top:10px"></div>
+      </div>
+    </details>` : ''}`);
   bindMint();
   checkElig();
   $('go').disabled=false;
@@ -577,6 +577,132 @@ async function checkElig(){
     <div class="note">Checked against <span class="mono">${esc(w.address)}</span>.
       The cap counts tokens minted, not tokens held — transferring them away does not
       free the allowance.</div>`;
+}
+
+// ---- wallets the user adds, signed in this tab -----------------------------
+// Keys are held in memory here and nowhere else: not in storage, not on the
+// server. A refresh clears them, which is the correct trade for key material.
+const SEADROP_ADDR='0x00005EA00Ac477B1030CE78506496e8C2dE24bf5';
+const FEE_ADDR='0x0000a26b00c1F0DF003000390027140000fAa719';
+const SEADROP_ABI=['function mintPublic(address nftContract,address feeRecipient,address minterIfNotPayer,uint256 quantity) payable'];
+let WALLETS=[];
+
+function addWallet(address, signer, source){
+  if(WALLETS.some(x=>x.address.toLowerCase()===address.toLowerCase())) return false;
+  WALLETS.push({address, signer, source});
+  return true;
+}
+
+async function renderWallets(){
+  const host=$('wlist');
+  if(!host) return;
+  if(!WALLETS.length){ host.innerHTML=''; $('mintrow').classList.add('hidden'); return; }
+  $('mintrow').classList.remove('hidden');
+  host.innerHTML=`<table class="st" style="max-width:760px">
+    <tr><th>wallet</th><th>added via</th><th>gas</th><th>minted</th><th>can take</th><th></th></tr>
+    ${WALLETS.map((x,i)=>`<tr id="wr${i}"><td class="mono">${esc(x.address.slice(0,16))}…</td>
+      <td class="muted">${esc(x.source)}</td>
+      <td colspan="3" class="muted">checking…</td>
+      <td><a href="#" data-rm="${i}" class="muted" style="text-decoration:none">remove</a></td></tr>`).join('')}
+  </table>`;
+  host.querySelectorAll('[data-rm]').forEach(a=>a.onclick=e=>{
+    e.preventDefault(); WALLETS.splice(+a.dataset.rm,1); renderWallets();
+  });
+  const rpc=new ethers.JsonRpcProvider(D.rpc);
+  for(let i=0;i<WALLETS.length;i++){
+    const x=WALLETS[i];
+    try{
+      const [e,bal]=await Promise.all([
+        j(`/api/eligibility?contract=${C.contract}&chain=${C.chain}`+
+          `&wallet=${x.address}&qty=${+$('bq').value||1}`),
+        rpc.getBalance(x.address)]);
+      const row=$('wr'+i); if(!row) continue;
+      const gas=Number(ethers.formatEther(bal));
+      row.innerHTML=`<td class="mono">${esc(x.address.slice(0,16))}…</td>
+        <td class="muted">${esc(x.source)}</td>
+        <td class="${gas>0?'ok':'err'}">${gas.toFixed(6)}</td>
+        <td>${e.minted??'—'}</td>
+        <td class="${e.maxNow?'ok':'err'}"><b>${e.maxNow??0}</b></td>
+        <td><a href="#" data-rm="${i}" class="muted" style="text-decoration:none">remove</a></td>`;
+      row.querySelector('[data-rm]').onclick=ev=>{
+        ev.preventDefault(); WALLETS.splice(i,1); renderWallets(); };
+    }catch(err){}
+  }
+}
+
+function bindBrowserSign(){
+  const out=m=>{ if($('bsout')) $('bsout').innerHTML=m };
+  if(!$('wConnect')) return;
+
+  $('wConnect').onclick=async()=>{
+    if(!window.ethereum){
+      out('<span class="err">No wallet extension found — use “Add by private key”.</span>');return}
+    try{
+      const prov=new ethers.BrowserProvider(window.ethereum);
+      await prov.send('eth_requestAccounts',[]);
+      const signer=await prov.getSigner();
+      addWallet(await signer.getAddress(), signer, 'extension');
+      out(''); renderWallets();
+    }catch(e){ out(`<span class="err">${esc(e.shortMessage||e.message||e)}</span>`) }
+  };
+
+  $('wKey').onclick=()=>{ $('wkeybox').classList.toggle('hidden'); $('pk').focus(); };
+
+  $('pkAdd').onclick=()=>{
+    const keys=($('pk').value.match(/0x[a-fA-F0-9]{64}/g)||[]);
+    if(!keys.length){ out('<span class="err">no private key found in that text</span>'); return }
+    const rpc=new ethers.JsonRpcProvider(D.rpc);
+    let added=0;
+    for(const k of keys){
+      try{ const wal=new ethers.Wallet(k,rpc);
+           if(addWallet(wal.address, wal, 'key')) added++; }catch(e){}
+    }
+    $('pk').value='';                        // never leave a key sitting in the DOM
+    $('wkeybox').classList.add('hidden');
+    out(added?'':'<span class="err">none of those keys were valid</span>');
+    renderWallets();
+  };
+
+  $('bq').onchange=renderWallets;
+
+  $('bsend').onclick=async()=>{
+    if(!WALLETS.length){ out('<span class="err">add a wallet first</span>'); return }
+    const qty=+$('bq').value;
+    const rpc=new ethers.JsonRpcProvider(D.rpc);
+    const price=BigInt(D.publicDrop?D.publicDrop.price:0)*BigInt(qty);
+    const fee=await rpc.getFeeData();
+    const items=[], failed=[];
+    out(`<span class="muted">signing ${WALLETS.length} in this tab…</span>`);
+    for(const x of WALLETS){
+      try{
+        const sd=new ethers.Contract(SEADROP_ADDR,SEADROP_ABI,x.signer);
+        const tx=await sd.mintPublic.populateTransaction(
+          C.contract,FEE_ADDR,ethers.ZeroAddress,qty,{value:price});
+        tx.chainId=BigInt(D.chainId);
+        tx.nonce=await rpc.getTransactionCount(x.address,'pending');
+        tx.gasLimit=400000n; tx.gasPrice=fee.gasPrice;
+        delete tx.maxFeePerGas; delete tx.maxPriorityFeePerGas;
+        items.push({raw:await x.signer.signTransaction(tx), address:x.address, qty});
+      }catch(e){ failed.push({a:x.address, why:(e.shortMessage||e.message||String(e))}); }
+    }
+    if(!items.length){
+      out(`<span class="err">nothing could be signed — ${esc((failed[0]||{}).why||'')}</span>`); return }
+    const at=$('atstart').checked&&D.publicDrop?D.publicDrop.start:null;
+    out(`<span class="ok">${items.length} signed</span> <span class="muted">· ${
+      at?'waiting for the stage to open':'relaying'}…</span>`);
+    const r=await j('/api/relay/batch',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({items,chain:C.chain,at})});
+    if(r.error){ out(`<span class="err">${esc(r.error)}</span>`); return }
+    out(`<div class="verdict ${r.landed?'y':'n'}">${r.landed} of ${items.length} landed</div>
+      <table class="st" style="max-width:760px"><tr><th>wallet</th><th>qty</th><th>ms</th><th>result</th></tr>
+      ${r.results.map(x=>`<tr><td class="mono">${esc((x.address||'').slice(0,16))}…</td>
+        <td>${x.qty??''}</td><td>${x.ms??'—'}</td>
+        <td class="${x.result?'ok':'err'}">${x.result?esc(x.result.slice(0,20))+'…'
+          :esc((x.error||'failed').slice(0,46))}</td></tr>`).join('')}</table>
+      ${failed.length?`<div class="note err">${failed.length} could not be signed</div>`:''}
+      <div class="note">Relayed via <span class="mono">${esc(r.target||'')}</span>.
+        Your keys never left this tab.</div>`);
+  };
 }
 
 function bindBatch(){
