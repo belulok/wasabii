@@ -88,6 +88,18 @@ h1 .mark{width:38px;height:38px;color:var(--acc);flex:none;transition:width .45s
 #runbar a{color:var(--acc);text-decoration:none}
 #runbar a:hover{text-decoration:underline}
 #runbar span{color:#5d646e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#runsbox{margin:18px 0 0;font-family:var(--mono)}
+#runsbox .hdr{display:flex;align-items:center;gap:10px;color:#5d646e;font-size:10.5px;
+  letter-spacing:.14em;text-transform:uppercase;margin-bottom:9px}
+#runsbox .hdr a{color:var(--acc);text-decoration:none;letter-spacing:0;text-transform:none;
+  font-size:11.5px}
+.rj{display:grid;grid-template-columns:86px 1fr 128px 92px;gap:12px;align-items:baseline;
+  padding:6px 0;border-top:1px solid #15181d;font-size:12px}
+.rj:first-of-type{border-top:0}
+.rj .st{font-weight:600}
+.st.scheduled{color:var(--warn)}.st.firing{color:var(--acc)}
+.st.done{color:var(--ok)}.st.failed,.st.cancelled{color:var(--bad)}
+.rj a{color:#6b727c;text-decoration:none}.rj a:hover{color:var(--bad)}
 .hidden{display:none}
 /* sub-steps: one line per field as it lands */
 .slns{margin-bottom:4px}
@@ -197,6 +209,7 @@ table.st td:not(:first-child),table.st th:not(:first-child){text-align:right}
   </div>
   <div id="runbar" class="hidden"><a href="#" id="newsearch">&larr; new search</a>
     <span id="runwhat"></span></div>
+  <div id="runsbox"></div>
   <div id="term"></div>
 </div>
 <script>
@@ -308,6 +321,44 @@ async function rows(host,items,delay=55){
   }
 }
 
+// ---- saved runs ------------------------------------------------------------
+let runsTimer=null;
+const ago=t=>{const d=Math.max(0,Math.floor(Date.now()/1000-t));
+  return d<60?d+'s ago':d<3600?Math.floor(d/60)+'m ago':
+         d<86400?Math.floor(d/3600)+'h ago':Math.floor(d/86400)+'d ago'};
+const until=t=>{let d=Math.floor(t-Date.now()/1000); if(d<=0) return 'due';
+  const h=Math.floor(d/3600),m=Math.floor(d%3600/60),sec=d%60;
+  return h?`in ${h}h ${m}m`:m?`in ${m}m ${sec}s`:`in ${sec}s`};
+
+async function loadRuns(){
+  let r; try{ r=await j('/api/jobs'); }catch(e){ return }
+  const box=$('runsbox'); if(!box) return;
+  const runs=r.runs||[];
+  if(!runs.length){ box.innerHTML=''; return }
+  const pending=runs.some(x=>x.status==='scheduled'||x.status==='firing');
+  box.innerHTML=`<div class="hdr">saved runs
+      <a href="#" id="runsrefresh">refresh</a></div>
+    ${runs.map(x=>`<div class="rj">
+      <span class="st ${esc(x.status)}">${esc(x.status)}</span>
+      <span class="muted">${esc(x.label||x.chain)} · ${x.count} wallet${x.count===1?'':'s'}
+        · ${x.tokens} token${x.tokens===1?'':'s'}${
+        x.status==='done'?` · <span class="ok">${x.landed} landed</span>`:''}</span>
+      <span class="muted">${x.at?(x.status==='scheduled'?until(x.at):'armed '+ago(x.created))
+                              :ago(x.created)}</span>
+      <span>${x.status==='scheduled'
+        ? `<a href="#" data-cancel="${esc(x.id)}">cancel</a>` : ''}</span>
+    </div>`).join('')}`;
+  $('runsrefresh').onclick=e=>{e.preventDefault();loadRuns()};
+  box.querySelectorAll('[data-cancel]').forEach(a=>a.onclick=async e=>{
+    e.preventDefault();
+    await j('/api/jobs/cancel',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id:a.dataset.cancel})});
+    loadRuns();
+  });
+  clearInterval(runsTimer);
+  if(pending) runsTimer=setInterval(loadRuns, 2000);   // only poll while something is live
+}
+
 function resetToHero(){
   clearInterval(tick);
   $('hero').classList.remove('ran');
@@ -316,6 +367,7 @@ function resetToHero(){
   C=D=P=BP=null;
   $('go').disabled=false;
   if(location.search) history.pushState({},'', location.pathname);
+  loadRuns();
 }
 
 async function run(push=true){
@@ -729,8 +781,17 @@ function bindBrowserSign(){
     out(`<span class="ok">${items.length} signed</span> <span class="muted">· ${
       at?'waiting for the stage to open':'relaying'}…</span>`);
     const r=await j('/api/relay/batch',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({items,chain:C.chain,at})});
+      body:JSON.stringify({items,chain:C.chain,at,
+        label:(C.name||C.contract.slice(0,10))+' · '+qty+' each'})});
     if(r.error){ out(`<span class="err">${esc(r.error)}</span>`); return }
+    if(r.scheduled){
+      out(`<div class="verdict y">armed — ${r.count} wallet${r.count===1?'':'s'},
+          ${r.tokens} tokens, firing at stage open</div>
+        <div class="note">Saved as run <span class="mono">${esc(r.jobId)}</span>.
+          It fires on the server, so you can close this tab. Track it under
+          <b>saved runs</b> above, where it can also be cancelled.</div>`);
+      loadRuns(); return;
+    }
     out(`<div class="verdict ${r.landed?'y':'n'}">${r.landed} of ${items.length} landed</div>
       <table class="st" style="max-width:760px"><tr><th>wallet</th><th>qty</th><th>ms</th><th>result</th></tr>
       ${r.results.map(x=>`<tr><td class="mono">${esc((x.address||'').slice(0,16))}…</td>
@@ -743,6 +804,7 @@ function bindBrowserSign(){
         esc((failed[0]||{}).why||'')}</div>`:''}
       <div class="note">Relayed via <span class="mono">${esc(r.target||'')}</span>.
         Your keys never left this tab.</div>`);
+    loadRuns();
   };
 }
 
@@ -845,6 +907,7 @@ addEventListener('popstate',()=>{
   // restore a run from the URL, so refresh does not lose the screen
   const c0=new URLSearchParams(location.search).get('c');
   if(c0){ $('url').value=c0; run(false); }
+  loadRuns();
   try{
     const me=await j('/auth/me');
     $('acct').innerHTML = me.email

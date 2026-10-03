@@ -859,7 +859,99 @@ def burst(rpcurl, raw, at, chain=None, lead=0.4, interval=0.025, window=4.0,
             'firstAt': attempts[0]['at'] if attempts else None}
 
 
-def relay_many(items, chain, at=None):
+# ------------------------------------------------------------------- runs
+# An armed mint used to hold the HTTP request open until the stage opened,
+# so closing the tab lost it. Armed batches become jobs instead: stored,
+# fired by a background thread, and reviewable afterwards. Only signed
+# transactions are kept -- those are public the moment they land -- never keys.
+JOBS_FILE = os.path.join(HERE, 'jobs.json')
+_joblock = threading.Lock()
+
+
+def _jobs_load():
+    try:
+        return json.load(open(JOBS_FILE))
+    except Exception:
+        return {}
+
+
+def _jobs_save(d):
+    old = os.umask(0o077)
+    try:
+        json.dump(d, open(JOBS_FILE, 'w'), indent=2)
+    finally:
+        os.umask(old)
+
+
+def job_put(job):
+    with _joblock:
+        d = _jobs_load()
+        d[job['id']] = job
+        # keep the file from growing without bound
+        if len(d) > 400:
+            for k in sorted(d, key=lambda k: d[k].get('created', 0))[:len(d) - 400]:
+                d.pop(k, None)
+        _jobs_save(d)
+
+
+def job_list(owner, limit=40):
+    d = _jobs_load()
+    mine = [j for j in d.values() if j.get('owner') == owner]
+    mine.sort(key=lambda j: j.get('created', 0), reverse=True)
+    out = []
+    for j in mine[:limit]:
+        out.append({k: v for k, v in j.items() if k != 'items'})
+    return out
+
+
+def job_get(owner, jid):
+    j = _jobs_load().get(jid)
+    if not j or j.get('owner') != owner:
+        return None
+    return {k: v for k, v in j.items() if k != 'items'}
+
+
+def _run_job(jid):
+    with _joblock:
+        d = _jobs_load()
+        j = d.get(jid)
+        if not j or j.get('status') != 'scheduled':
+            return
+        j['status'] = 'firing'
+        _jobs_save(d)
+    try:
+        rpcurl, _ = CHAINS[j['chain']]
+        out = batch_fire(rpcurl, j['items'], None, j['chain'])
+        res = [{k: v for k, v in r.items() if k != 'raw'} for r in out['results']]
+        status, landed = 'done', out['landed']
+    except Exception as e:
+        res, status, landed = [{'error': str(e)[:160]}], 'failed', 0
+    with _joblock:
+        d = _jobs_load()
+        if jid in d:
+            d[jid].update(status=status, landed=landed, results=res,
+                          finished=int(time.time()))
+            _jobs_save(d)
+
+
+def _scheduler():
+    """Fire anything whose moment has come. Slightly early, then the submit
+    path's own retry covers the boundary."""
+    while True:
+        try:
+            now = time.time()
+            for j in list(_jobs_load().values()):
+                if j.get('status') == 'scheduled' and j.get('at', 0) - 0.35 <= now:
+                    threading.Thread(target=_run_job, args=(j['id'],), daemon=True).start()
+        except Exception:
+            pass
+        time.sleep(0.25)
+
+
+threading.Thread(target=_scheduler, daemon=True).start()
+
+
+def relay_many(items, chain, at=None, owner=None, label=None):
     """Relay a batch of already-signed transactions, one per wallet.
 
     Each item is {raw, address?} signed in the caller's browser. They are
@@ -882,10 +974,27 @@ def relay_many(items, chain, at=None):
             raise ValueError('transaction too large')
         prepared.append({'address': (it.get('address') or '')[:42],
                          'qty': it.get('qty'), 'raw': raw})
-    out = batch_fire(rpcurl, prepared, at, chain)
+    if at and float(at) > time.time() + 1:
+        job = {'id': secrets.token_urlsafe(9), 'owner': owner or 'anon',
+               'chain': chain, 'label': label or '', 'at': float(at),
+               'created': int(time.time()), 'status': 'scheduled',
+               'count': len(prepared), 'tokens': sum(int(p.get('qty') or 0) for p in prepared),
+               'wallets': [p['address'] for p in prepared], 'items': prepared}
+        job_put(job)
+        return {'scheduled': True, 'jobId': job['id'], 'at': job['at'],
+                'count': job['count'], 'tokens': job['tokens']}
+
+    out = batch_fire(rpcurl, prepared, None, chain)
+    res = [{k: v for k, v in r.items() if k != 'raw'} for r in out['results']]
+    job = {'id': secrets.token_urlsafe(9), 'owner': owner or 'anon',
+           'chain': chain, 'label': label or '', 'at': None,
+           'created': int(time.time()), 'status': 'done',
+           'count': len(prepared), 'tokens': sum(int(p.get('qty') or 0) for p in prepared),
+           'wallets': [p['address'] for p in prepared],
+           'landed': out['landed'], 'results': res, 'items': []}
+    job_put(job)
     return {'landed': out['landed'], 'target': out['target'],
-            'results': [{k: v for k, v in r.items() if k != 'raw'}
-                        for r in out['results']]}
+            'jobId': job['id'], 'results': res}
 
 
 def relay(raw, chain, at=None, lanes=2):
@@ -1260,6 +1369,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(batch_preflight(q['path'][0], q['contract'][0],
                                                   q['chain'][0], int(q.get('qty', ['10'])[0])))
+            if u.path == '/api/jobs':
+                return self._send({'runs': job_list(self._who() or 'token')})
             if u.path == '/api/key':
                 k = api_key()
                 try:
@@ -1397,7 +1508,19 @@ class H(http.server.BaseHTTPRequestHandler):
                     return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(prepare(d['contract'], d['chain'], int(d['qty']), d['account']))
             if u.path == '/api/relay/batch':
-                return self._send(relay_many(d.get('items'), d.get('chain'), d.get('at')))
+                return self._send(relay_many(d.get('items'), d.get('chain'), d.get('at'),
+                                             self._who() or 'token', d.get('label')))
+            if u.path == '/api/jobs/cancel':
+                with _joblock:
+                    jd = _jobs_load()
+                    jj = jd.get(d.get('id'))
+                    if not jj or jj.get('owner') != (self._who() or 'token'):
+                        return self._deny(404, 'no such run')
+                    if jj.get('status') != 'scheduled':
+                        return self._deny(409, f"already {jj.get('status')}")
+                    jj['status'] = 'cancelled'; jj['items'] = []
+                    _jobs_save(jd)
+                return self._send({'ok': True})
             if u.path == '/api/relay':
                 return self._send(relay(d.get('raw'), d.get('chain'),
                                         d.get('at'), d.get('lanes', 2)))
