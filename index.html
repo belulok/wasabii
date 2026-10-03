@@ -773,7 +773,7 @@ async function run(push=true, force=false){
     </div>
     <div id="bsout" style="margin-top:11px"></div>
 
-    <div id="fundbox" class="hidden" style="margin-top:20px;padding-top:15px;border-top:1px solid #1e232b">
+    <div id="fundbox" style="margin-top:20px;padding-top:15px;border-top:1px solid #1e232b">
       <div class="lbl" style="margin-bottom:9px">top up gas
         <i>— send from one wallet to the ones above</i></div>
       <div class="row">
@@ -942,9 +942,16 @@ function bindBrowserSign(){
   const fout=m=>{ if($('fplan')) $('fplan').innerHTML=m };
 
   async function planFunding(){
-    if(!WALLETS.length||!D){ $('fundbox').classList.add('hidden'); return }
-    $('fundbox').classList.remove('hidden');
-    if(!FUNDER){ fout('<div class="note">Choose a wallet to send gas from.</div>'); return }
+    if(!D) return;
+    if(!WALLETS.length){
+      fout('<div class="note">Add the wallets you want to mint with above, and this will '
+          +'work out what each one needs and send it.</div>');
+      return;
+    }
+    if(!FUNDER){
+      fout('<div class="note">Pick a wallet to send the gas from — connected, or by key.</div>');
+      return;
+    }
     const rpc=new ethers.JsonRpcProvider(D.rpc);
     const qty=+$('bq').value||1;
     const fee=await rpc.getFeeData();
@@ -1015,6 +1022,9 @@ function bindBrowserSign(){
     }
     setTimeout(()=>{renderWallets();planFunding()},3500);
   }
+
+  window.__planFunding=planFunding;   // so the panel renders on first paint
+  planFunding();
 
   $('fConnect').onclick=async()=>{
     if(!window.ethereum){fout('<span class="err">no wallet extension found</span>');return}
@@ -1163,6 +1173,7 @@ function bindBatch(){
 
 function bindMint(){
   bindBrowserSign();
+  if(typeof window.__planFunding==='function') window.__planFunding();
   if(!$('acct')) return;          // non-owners get browser signing only
   $('acct').onchange=checkElig; $('qty').onchange=checkElig;
   bindBatch();
