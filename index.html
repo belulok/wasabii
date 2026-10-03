@@ -328,6 +328,16 @@ let GEN=0;
 // scratch; the server-side jobs they produced are unaffected either way.
 const DONE_RUNS=new Map();
 const keyFor=q=>String(q||'').trim().toLowerCase();
+// A finished search is stored as the replies it was built from, so repeating
+// it replays the same render instead of reading the chain again. SNAP holds
+// those replies while replaying; COLLECT gathers them on a live run.
+let SNAP=null, COLLECT=null;
+async function step(name,url){
+  if(SNAP && SNAP[name]!==undefined) return SNAP[name];
+  const r=await j(url);
+  if(COLLECT) COLLECT[name]=r;
+  return r;
+}
 
 function line(text){
   const el=document.createElement('div');
@@ -549,6 +559,17 @@ async function run(push=true, force=false){
   const q=$('url').value.trim();
   if(!q) return;
   const key=keyFor(q);
+  if(!force && !DONE_RUNS.has(key)){
+    try{
+      const sc=await j('/api/scans?k='+encodeURIComponent(key));
+      if(sc && !sc.miss && sc.payload && sc.payload.resolve){
+        SNAP=sc.payload; COLLECT=null;
+        await runFresh(q,key,push,sc.created);   // replays, no network reads
+        SNAP=null;
+        return;
+      }
+    }catch(e){}
+  }
   const cached=DONE_RUNS.get(key);
   if(cached && !force){
     // same collection: show what we already have rather than running it twice
@@ -567,8 +588,14 @@ async function run(push=true, force=false){
     loadRuns();
     return;
   }
+  SNAP=null;
+  return runFresh(q,key,push,null);
+}
+
+async function runFresh(q,key,push,replayedAt){
   const gen=++GEN;
   const alive=()=>gen===GEN;
+  if(!SNAP) COLLECT={};
   $('go').disabled=true;
   $('hero').classList.add('ran');
   // the run is addressable, so a refresh or a shared link rebuilds it instead
@@ -582,7 +609,7 @@ async function run(push=true, force=false){
 
   // 1 — resolve
   let L=line(`resolving <b>${esc($('url').value)}</b>`);
-  C=await j('/api/resolve?url='+encodeURIComponent(q));
+  C=await step('resolve','/api/resolve?url='+encodeURIComponent(q));
   if(!alive())return;
   if(C.error){L.fail(C.error);$('go').disabled=false;return}
   if($('chain').value)C.chain=$('chain').value;
@@ -611,7 +638,7 @@ async function run(push=true, force=false){
 
   // 2 — drop
   L=line(`reading drop from <b>${esc(C.chain)}</b>`);
-  D=await j(`/api/drop?contract=${C.contract}&chain=${C.chain}`);
+  D=await step('drop',`/api/drop?contract=${C.contract}&chain=${C.chain}`);
   if(!alive())return;
   if(D.error){L.fail(D.error);$('go').disabled=false;return}
   const p=D.publicDrop,sup=+D.totalSupply||0,max=+D.maxSupply||0;
@@ -663,7 +690,7 @@ async function run(push=true, force=false){
 
   // market, into the collection panel
   if(C.slug){
-    const mk=await j('/api/market?slug='+encodeURIComponent(C.slug));
+    const mk=await step('market','/api/market?slug='+encodeURIComponent(C.slug));
     if($('mkt'))$('mkt').innerHTML=mk.unavailable?''
       :`<div class="stat" style="margin-top:13px">
         <div><b>${mk.floor??'—'}</b><span>floor ${esc(mk.floorSymbol||'')}</span></div>
@@ -680,7 +707,7 @@ async function run(push=true, force=false){
 
   // 3 — latency
   L=line('benchmarking rpc <span class="muted">(12 warm + 6 cold)</span>');
-  const b=await j('/api/bench?rpc='+encodeURIComponent(D.rpc)+'&n=12');
+  const b=await step('bench','/api/bench?rpc='+encodeURIComponent(D.rpc)+'&n=12');
   if(!alive())return;
   if(b.error){L.fail(b.error)}
   else{
@@ -699,7 +726,7 @@ async function run(push=true, force=false){
   }
   // 3b — write path
   L=line('timing the write path <span class="muted">(sequencer vs public rpc)</span>');
-  const sb=await j(`/api/submitbench?rpc=${encodeURIComponent(D.rpc)}&chain=${C.chain}&n=10`);
+  const sb=await step('submit',`/api/submitbench?rpc=${encodeURIComponent(D.rpc)}&chain=${C.chain}&n=10`);
   if(!alive())return;
   if(sb.error||!sb.publicRpc){L.fail(sb.error||'unavailable')}
   else{
@@ -731,7 +758,7 @@ async function run(push=true, force=false){
 
   // 4 — stage history
   L=line('scanning SeaDropMint events <span class="muted">(this one is slow)</span>');
-  const r=await j(`/api/stages?contract=${C.contract}&chain=${C.chain}`);
+  const r=await step('stages',`/api/stages?contract=${C.contract}&chain=${C.chain}`);
   if(!alive())return;
   if(r.error){L.fail(r.error)}
   else if(!r.stages.length){L.ok('no mints found')}
@@ -772,7 +799,8 @@ async function run(push=true, force=false){
     <div class="note" style="margin-top:7px">
       An extension signs and broadcasts on its own — one confirmation per wallet, at its
       own RPC speed. Pasted keys are signed here and relayed from <b>~19ms</b> away,
-      with no prompts, which is what makes several wallets practical.
+      with no prompts, which is what makes several wallets practical — and they are the
+      only ones that can be scheduled for a stage that has not opened yet.
     </div>
     <div id="wkeybox" class="hidden" style="margin-top:9px">
       <textarea id="pk" class="f" spellcheck="false" autocomplete="off"
@@ -828,7 +856,16 @@ async function run(push=true, force=false){
   checkElig();
   if(alive()){
     DONE_RUNS.set(key,{term:$('term').innerHTML, C, D, when:Date.now()});
-    $('runwhat').innerHTML=`${esc(q)} <a href="#" id="rerun"
+    if(COLLECT && Object.keys(COLLECT).length){
+      // keep the replies so this collection is not read twice
+      j('/api/scans',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({k:key,label:(C.name||C.contract),contract:C.contract,
+                             chain:C.chain,payload:COLLECT})}).catch(()=>{});
+    }
+    COLLECT=null;
+    $('runwhat').innerHTML=`${esc(q)}${replayedAt
+      ? ` <span class="muted">· from a run ${ago(replayedAt)}</span>`:''}
+      <a href="#" id="rerun"
       style="color:var(--acc);text-decoration:none;margin-left:10px">re-run</a>`;
     const rr=$('rerun'); if(rr) rr.onclick=e=>{e.preventDefault();run(false,true)};
   }

@@ -82,6 +82,20 @@ CREATE TABLE IF NOT EXISTS collections (
   updated  INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- A completed search, kept so the same collection is not read twice. Stores
+-- the API replies it was built from, never rendered HTML: replaying the data
+-- through the same code is both smaller and safer than storing markup.
+CREATE TABLE IF NOT EXISTS scans (
+  owner    TEXT NOT NULL,
+  k        TEXT NOT NULL,
+  label    TEXT,
+  contract TEXT,
+  chain    TEXT,
+  payload  TEXT NOT NULL,
+  created  INTEGER NOT NULL,
+  PRIMARY KEY (owner, k)
+);
+CREATE INDEX IF NOT EXISTS scans_recent ON scans(owner, created DESC);
 """
 
 
@@ -797,6 +811,37 @@ def stages(contract, chain):
     return {'stages': out, 'totalTokens': sum(a['tokens'] for a in out),
             'totalTxs': sum(a['txs'] for a in out),
             'scannedBlocks': head - frm, 'head': head}
+
+
+def scan_put(owner, key, label, contract, chain, payload):
+    db().execute("""INSERT OR REPLACE INTO scans(owner,k,label,contract,chain,payload,created)
+                    VALUES(?,?,?,?,?,?,?)""",
+                 (owner, key[:200], label, contract, chain,
+                  json.dumps(payload)[:400000], int(time.time())))
+    db().execute("""DELETE FROM scans WHERE owner=? AND k NOT IN
+                    (SELECT k FROM scans WHERE owner=? ORDER BY created DESC LIMIT 60)""",
+                 (owner, owner))
+
+
+def scan_get(owner, key):
+    r = db().execute('SELECT * FROM scans WHERE owner=? AND k=?',
+                     (owner, key[:200])).fetchone()
+    if not r:
+        return None
+    try:
+        payload = json.loads(r['payload'])
+    except Exception:
+        return None
+    return {'k': r['k'], 'label': r['label'], 'contract': r['contract'],
+            'chain': r['chain'], 'created': r['created'], 'payload': payload}
+
+
+def scan_list(owner, limit=40):
+    return [{'k': r['k'], 'label': r['label'], 'contract': r['contract'],
+             'chain': r['chain'], 'created': r['created']}
+            for r in db().execute(
+                'SELECT k,label,contract,chain,created FROM scans WHERE owner=? '
+                'ORDER BY created DESC LIMIT ?', (owner, limit)).fetchall()]
 
 
 def market(slug):
@@ -1576,6 +1621,12 @@ class H(http.server.BaseHTTPRequestHandler):
                     return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(batch_preflight(q['path'][0], q['contract'][0],
                                                   q['chain'][0], int(q.get('qty', ['10'])[0])))
+            if u.path == '/api/scans':
+                owner = self._who() or 'token'
+                if q.get('k'):
+                    sc = scan_get(owner, q['k'][0])
+                    return self._send(sc or {'miss': True})
+                return self._send({'scans': scan_list(owner)})
             if u.path == '/api/jobs':
                 owner = self._who() or 'token'
                 if q.get('id'):
@@ -1712,6 +1763,10 @@ class H(http.server.BaseHTTPRequestHandler):
             if u.path == '/api/relay/batch':
                 return self._send(relay_many(d.get('items'), d.get('chain'), d.get('at'),
                                              self._who() or 'token', d.get('label')))
+            if u.path == '/api/scans':
+                scan_put(self._who() or 'token', d.get('k') or '', d.get('label'),
+                         d.get('contract'), d.get('chain'), d.get('payload') or {})
+                return self._send({'ok': True})
             if u.path == '/api/runs/record':
                 # Extension wallets broadcast through MetaMask and never reach
                 # the relay, so without this their mints leave no trace at all.
