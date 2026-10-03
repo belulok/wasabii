@@ -20,6 +20,7 @@ ever land.
 """
 import http.server, socketserver, json, subprocess, urllib.request, urllib.parse
 import ssl, http.client, threading, time, os, re, socket, secrets, hmac, hashlib, base64
+import sqlite3
 
 PORT = int(os.environ.get('PORT', '8899'))
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +43,117 @@ WALLET_ROOTS = []
 # they replace a token in the URL (which leaks into history, referrers and
 # screenshots) and because entry is restricted to an allowlist. Open signup
 # would mean custodying other people's keys on an internet-facing host.
-USERS_FILE = os.path.join(HERE, 'users.json')
+DB_PATH = os.environ.get('WASABI_DB', os.path.join(HERE, 'wasabi.db'))
+_tls = threading.local()
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+  email    TEXT PRIMARY KEY,
+  via      TEXT NOT NULL,
+  pw       TEXT,
+  created  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS jobs (
+  id       TEXT PRIMARY KEY,
+  owner    TEXT NOT NULL,
+  chain    TEXT NOT NULL,
+  label    TEXT,
+  at       REAL,
+  created  INTEGER NOT NULL,
+  status   TEXT NOT NULL,
+  count    INTEGER NOT NULL DEFAULT 0,
+  tokens   INTEGER NOT NULL DEFAULT 0,
+  landed   INTEGER,
+  firedAt  REAL,
+  lateBy   REAL,
+  finished INTEGER,
+  wallets  TEXT NOT NULL DEFAULT '[]',
+  items    TEXT NOT NULL DEFAULT '[]',
+  results  TEXT NOT NULL DEFAULT '[]'
+);
+-- the scheduler asks one question constantly: what is due next
+CREATE INDEX IF NOT EXISTS jobs_due   ON jobs(status, at);
+CREATE INDEX IF NOT EXISTS jobs_owner ON jobs(owner, created DESC);
+CREATE TABLE IF NOT EXISTS collections (
+  slug     TEXT PRIMARY KEY,
+  contract TEXT NOT NULL,
+  chain    TEXT NOT NULL,
+  name     TEXT, image TEXT, site TEXT, owner TEXT,
+  updated  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+"""
+
+
+def db():
+    """One connection per thread; sqlite3 objects are not thread-safe."""
+    c = getattr(_tls, 'conn', None)
+    if c is None:
+        c = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
+        c.row_factory = sqlite3.Row
+        c.execute('PRAGMA journal_mode=WAL')    # readers never block the writer
+        c.execute('PRAGMA synchronous=NORMAL')
+        c.execute('PRAGMA busy_timeout=10000')
+        _tls.conn = c
+    return c
+
+
+def _init_db():
+    os.makedirs(os.path.dirname(DB_PATH) or '.', exist_ok=True)
+    db().executescript(SCHEMA)
+    try:
+        os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
+    _migrate_json()
+
+
+def _migrate_json():
+    """Carry over anything the file-based version left behind, once."""
+    c = db()
+    if c.execute("SELECT v FROM settings WHERE k='migrated'").fetchone():
+        return
+    for name, loader in (('users.json', 'users'), ('jobs.json', 'jobs'),
+                         ('collections.json', 'collections'), ('apikey.json', 'apikey')):
+        path = os.path.join(HERE, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            d = json.load(open(path))
+        except Exception:
+            continue
+        if loader == 'users':
+            for e, v in d.items():
+                c.execute('INSERT OR IGNORE INTO users(email,via,pw,created) VALUES(?,?,?,?)',
+                          (e, v.get('via', 'password'), v.get('pw'),
+                           int(v.get('created', time.time()))))
+        elif loader == 'jobs':
+            for j in d.values():
+                c.execute("""INSERT OR IGNORE INTO jobs
+                    (id,owner,chain,label,at,created,status,count,tokens,landed,
+                     firedAt,lateBy,finished,wallets,items,results)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (j.get('id'), j.get('owner', 'anon'), j.get('chain', 'robinhood'),
+                     j.get('label'), j.get('at'), int(j.get('created', time.time())),
+                     j.get('status', 'done'), j.get('count', 0), j.get('tokens', 0),
+                     j.get('landed'), j.get('firedAt'), j.get('lateBy'), j.get('finished'),
+                     json.dumps(j.get('wallets', [])), json.dumps(j.get('items', [])),
+                     json.dumps(j.get('results', []))))
+        elif loader == 'collections':
+            for slug, v in d.items():
+                c.execute("""INSERT OR IGNORE INTO collections
+                    (slug,contract,chain,name,image,site,owner,updated)
+                    VALUES(?,?,?,?,?,?,?,?)""",
+                    (slug, v.get('contract', ''), v.get('chain', ''), v.get('name'),
+                     v.get('image'), v.get('site'), v.get('owner'), int(time.time())))
+        elif loader == 'apikey':
+            c.execute("INSERT OR REPLACE INTO settings(k,v) VALUES('apikey',?)",
+                      (json.dumps(d),))
+    c.execute("INSERT OR REPLACE INTO settings(k,v) VALUES('migrated',?)",
+              (str(int(time.time())),))
+
+
+USERS_FILE = os.path.join(HERE, 'users.json')   # legacy, read once at migration
 SESSION_TTL = int(os.environ.get('SESSION_TTL', 60 * 60 * 24 * 30))
 ALLOWED = {e.strip().lower() for e in
            os.environ.get('WASABI_ALLOWED_EMAILS', '').split(',') if e.strip()}
@@ -96,19 +207,18 @@ def _unb64(t):
     return base64.urlsafe_b64decode(t + '=' * (-len(t) % 4))
 
 
-def _users():
-    try:
-        return json.load(open(USERS_FILE))
-    except Exception:
-        return {}
+def user_get(email):
+    r = db().execute('SELECT * FROM users WHERE email=?', (email.lower(),)).fetchone()
+    return dict(r) if r else None
 
 
-def _save_users(d):
-    old = os.umask(0o077)
-    try:
-        json.dump(d, open(USERS_FILE, 'w'), indent=2)
-    finally:
-        os.umask(old)
+def user_add(email, via, pw=None):
+    db().execute('INSERT INTO users(email,via,pw,created) VALUES(?,?,?,?)',
+                 (email.lower(), via, pw, int(time.time())))
+
+
+def user_count():
+    return db().execute('SELECT COUNT(*) c FROM users').fetchone()['c']
 
 
 # scrypt is preferred but is missing from some Python builds (notably the
@@ -152,7 +262,7 @@ def email_allowed(email):
         return '@' in email
     if ALLOWED:
         return email in ALLOWED
-    return not _users()          # first-run claim
+    return user_count() == 0          # first-run claim
 
 
 def new_session(email):
@@ -275,7 +385,8 @@ def api_key():
         return env
     with _keylock:
         try:
-            d = json.load(open(KEYFILE))
+            row = db().execute("SELECT v FROM settings WHERE k='apikey'").fetchone()
+            d = json.loads(row['v']) if row else {}
             exp = d.get('expires_at', '')
             # refresh inside the last 12h rather than failing mid-session
             left = (time.mktime(time.strptime(exp[:19], '%Y-%m-%dT%H:%M:%S'))
@@ -290,11 +401,8 @@ def api_key():
             with urllib.request.urlopen(req, timeout=20) as r:
                 d = json.load(r)
             if d.get('api_key'):
-                old = os.umask(0o077)
-                try:
-                    json.dump(d, open(KEYFILE, 'w'), indent=2)
-                finally:
-                    os.umask(old)
+                db().execute("INSERT OR REPLACE INTO settings(k,v) VALUES('apikey',?)",
+                             (json.dumps(d),))
                 return d['api_key']
         except Exception:
             pass
@@ -319,17 +427,26 @@ def os_get(path, timeout=20):
 
 
 def cache_load():
+    out = {}
     try:
-        return json.load(open(CACHE))
+        for r in db().execute('SELECT * FROM collections').fetchall():
+            out[r['slug']] = {'slug': r['slug'], 'contract': r['contract'],
+                              'chain': r['chain'], 'name': r['name'],
+                              'image': r['image'], 'site': r['site'],
+                              'owner': r['owner'], 'others': []}
     except Exception:
-        return {}
+        pass
+    return out
 
 
 def cache_put(slug, rec):
-    d = cache_load()
-    d[slug.lower()] = rec
     try:
-        json.dump(d, open(CACHE, 'w'), indent=2)
+        db().execute("""INSERT OR REPLACE INTO collections
+            (slug,contract,chain,name,image,site,owner,updated)
+            VALUES(?,?,?,?,?,?,?,?)""",
+            (slug.lower(), rec.get('contract', ''), rec.get('chain', ''),
+             rec.get('name'), rec.get('image'), rec.get('site'), rec.get('owner'),
+             int(time.time())))
     except Exception:
         pass
 
@@ -904,61 +1021,63 @@ def burst(rpcurl, raw, at, chain=None, lead=0.4, interval=0.025, window=4.0,
 # so closing the tab lost it. Armed batches become jobs instead: stored,
 # fired by a background thread, and reviewable afterwards. Only signed
 # transactions are kept -- those are public the moment they land -- never keys.
-JOBS_FILE = os.path.join(HERE, 'jobs.json')
-_joblock = threading.Lock()
+JOBS_FILE = os.path.join(HERE, 'jobs.json')     # legacy, migrated once
 
 
-def _jobs_load():
-    try:
-        return json.load(open(JOBS_FILE))
-    except Exception:
-        return {}
-
-
-def _jobs_save(d):
-    old = os.umask(0o077)
-    try:
-        json.dump(d, open(JOBS_FILE, 'w'), indent=2)
-    finally:
-        os.umask(old)
+def _job_row(r):
+    d = dict(r)
+    for k in ('wallets', 'items', 'results'):
+        try:
+            d[k] = json.loads(d.get(k) or '[]')
+        except Exception:
+            d[k] = []
+    return d
 
 
 def job_put(job):
-    with _joblock:
-        d = _jobs_load()
-        d[job['id']] = job
-        # keep the file from growing without bound
-        if len(d) > 400:
-            for k in sorted(d, key=lambda k: d[k].get('created', 0))[:len(d) - 400]:
-                d.pop(k, None)
-        _jobs_save(d)
+    db().execute("""INSERT OR REPLACE INTO jobs
+        (id,owner,chain,label,at,created,status,count,tokens,landed,
+         firedAt,lateBy,finished,wallets,items,results)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (job['id'], job.get('owner', 'anon'), job['chain'], job.get('label'),
+         job.get('at'), job.get('created', int(time.time())), job['status'],
+         job.get('count', 0), job.get('tokens', 0), job.get('landed'),
+         job.get('firedAt'), job.get('lateBy'), job.get('finished'),
+         json.dumps(job.get('wallets', [])), json.dumps(job.get('items', [])),
+         json.dumps(job.get('results', []))))
+    db().execute("""DELETE FROM jobs WHERE id IN
+        (SELECT id FROM jobs ORDER BY created DESC LIMIT -1 OFFSET 400)""")
 
 
 def job_list(owner, limit=40):
-    d = _jobs_load()
-    mine = [j for j in d.values() if j.get('owner') == owner]
-    mine.sort(key=lambda j: j.get('created', 0), reverse=True)
+    rows = db().execute(
+        'SELECT * FROM jobs WHERE owner=? ORDER BY created DESC LIMIT ?',
+        (owner, limit)).fetchall()
     out = []
-    for j in mine[:limit]:
-        out.append({k: v for k, v in j.items() if k != 'items'})
+    for r in rows:
+        d = _job_row(r)
+        d.pop('items', None)
+        out.append(d)
     return out
 
 
 def job_get(owner, jid):
-    j = _jobs_load().get(jid)
-    if not j or j.get('owner') != owner:
+    r = db().execute('SELECT * FROM jobs WHERE id=? AND owner=?', (jid, owner)).fetchone()
+    if not r:
         return None
-    return {k: v for k, v in j.items() if k != 'items'}
+    d = _job_row(r)
+    d.pop('items', None)
+    return d
 
 
 def _run_job(jid):
-    with _joblock:
-        d = _jobs_load()
-        j = d.get(jid)
-        if not j or j.get('status') != 'scheduled':
-            return
-        j['status'] = 'firing'
-        _jobs_save(d)
+    # claim it atomically, so two threads can never fire the same job
+    cur = db().execute("UPDATE jobs SET status='firing' WHERE id=? AND status='scheduled'",
+                       (jid,))
+    if cur.rowcount != 1:
+        return
+    r = db().execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone()
+    j = _job_row(r)
     fired = time.time()
     try:
         rpcurl, _ = CHAINS[j['chain']]
@@ -971,49 +1090,20 @@ def _run_job(jid):
     # supply often remains -- but silently calling that 'done' hides the one
     # fact that decides whether it was any use.
     late = max(0.0, fired - (j.get('at') or fired)) if j.get('at') else 0.0
-    with _joblock:
-        d = _jobs_load()
-        if jid in d:
-            d[jid].update(status=status, landed=landed, results=res,
-                          finished=int(time.time()), firedAt=fired,
-                          lateBy=round(late, 2))
-            d[jid]['items'] = []          # signed bytes are spent; drop them
-            _jobs_save(d)
-    _jobs_cache['mtime'] = -1
-
-
-_jobs_cache = {'mtime': -1, 'data': {}}
-
-
-def _jobs_cached():
-    """Re-read only when the file actually changed."""
-    try:
-        m = os.path.getmtime(JOBS_FILE)
-    except OSError:
-        return {}
-    if m != _jobs_cache['mtime']:
-        _jobs_cache['data'] = _jobs_load()
-        _jobs_cache['mtime'] = m
-    return _jobs_cache['data']
+    db().execute("""UPDATE jobs SET status=?, landed=?, results=?, finished=?,
+                     firedAt=?, lateBy=?, items='[]' WHERE id=?""",
+                 (status, landed, json.dumps(res), int(time.time()),
+                  fired, round(late, 2), jid))
 
 
 def _recover_stuck():
     """A job marked 'firing' when the process died never finishes on its own."""
-    with _joblock:
-        d = _jobs_load()
-        changed = False
-        for j in d.values():
-            if j.get('status') != 'firing':
-                continue
-            if j.get('at') and j['at'] > time.time():
-                j['status'] = 'scheduled'           # its moment has not passed
-            else:
-                j['status'] = 'failed'
-                j['results'] = [{'error': 'server restarted while firing'}]
-            changed = True
-        if changed:
-            _jobs_save(d)
-            _jobs_cache['mtime'] = -1
+    now = time.time()
+    db().execute("""UPDATE jobs SET status='scheduled'
+                    WHERE status='firing' AND at IS NOT NULL AND at > ?""", (now,))
+    db().execute("""UPDATE jobs SET status='failed',
+                      results='[{\"error\":\"server restarted while firing\"}]'
+                    WHERE status='firing'""")
 
 
 LEAD = 0.35          # fire this early; the submit path's retry covers the rest
@@ -1031,11 +1121,13 @@ def _scheduler():
     _recover_stuck()
     while True:
         try:
-            pending = [j for j in _jobs_cached().values() if j.get('status') == 'scheduled']
+            pending = [dict(r) for r in db().execute(
+                """SELECT id, at FROM jobs WHERE status='scheduled' AND at IS NOT NULL
+                   ORDER BY at LIMIT 50""").fetchall()]
             if not pending:
                 time.sleep(1.0)
                 continue
-            target = min(j['at'] for j in pending) - LEAD
+            target = pending[0]['at'] - LEAD
             wait = target - time.time()
             if wait > 2.0:
                 time.sleep(min(wait - 1.0, 5.0))    # wake to pick up new arrivals
@@ -1048,12 +1140,12 @@ def _scheduler():
             for j in pending:
                 if j['at'] - LEAD <= now:
                     threading.Thread(target=_run_job, args=(j['id'],), daemon=True).start()
-            _jobs_cache['mtime'] = -1               # statuses just changed
             time.sleep(0.05)
         except Exception:
             time.sleep(1.0)
 
 
+_init_db()
 threading.Thread(target=_scheduler, daemon=True).start()
 
 
@@ -1489,7 +1581,8 @@ class H(http.server.BaseHTTPRequestHandler):
             if u.path == '/api/key':
                 k = api_key()
                 try:
-                    meta = json.load(open(KEYFILE))
+                    row = db().execute("SELECT v FROM settings WHERE k='apikey'").fetchone()
+                    meta = json.loads(row['v']) if row else {}
                 except Exception:
                     meta = {}
                 return self._send({'have': bool(k), 'name': meta.get('name'),
@@ -1514,7 +1607,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send({'email': who, 'google': bool(GOOGLE_ID),
                                'owner': is_owner(who) or self._token_ok(),
                                'open': OPEN_SIGNUP,
-                               'claimable': not OPEN_SIGNUP and not ALLOWED and not _users()})
+                               'claimable': not OPEN_SIGNUP and not ALLOWED and user_count() == 0})
         if u.path == '/auth/logout':
             self.send_response(302)
             self.send_header('Location', '/')
@@ -1542,12 +1635,11 @@ class H(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 return self._deny(400, f'google sign-in failed: {e}')
             email = (info.get('email') or '').lower()
-            users = _users()
-            if email not in users and not email_allowed(email):
+            known = user_get(email)
+            if not known and not email_allowed(email):
                 return self._deny(403, f'{email} is not on the allowlist')
-            if email not in users:
-                users[email] = {'via': 'google', 'created': int(time.time())}
-                _save_users(users)
+            if not known:
+                user_add(email, 'google')
             sid = new_session(email)
             self.send_response(302)
             self.send_header('Location', '/')
@@ -1562,17 +1654,14 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._deny(400, 'enter a valid email')
         if len(pw) < 10:
             return self._deny(400, 'password must be at least 10 characters')
-        users = _users()
         if path == '/auth/signup':
-            if email in users:
+            if user_get(email):
                 return self._deny(409, 'that account already exists — sign in instead')
             if not email_allowed(email):
                 return self._deny(403, 'this email is not on the allowlist')
-            users[email] = {'via': 'password', 'pw': hash_pw(pw),
-                            'created': int(time.time())}
-            _save_users(users)
+            user_add(email, 'password', hash_pw(pw))
         elif path == '/auth/login':
-            rec = users.get(email)
+            rec = user_get(email)
             # same response either way, so the endpoint does not reveal who exists
             if not rec or not rec.get('pw') or not check_pw(pw, rec['pw']):
                 time.sleep(0.4)
@@ -1617,15 +1706,12 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(relay_many(d.get('items'), d.get('chain'), d.get('at'),
                                              self._who() or 'token', d.get('label')))
             if u.path == '/api/jobs/cancel':
-                with _joblock:
-                    jd = _jobs_load()
-                    jj = jd.get(d.get('id'))
-                    if not jj or jj.get('owner') != (self._who() or 'token'):
-                        return self._deny(404, 'no such run')
-                    if jj.get('status') != 'scheduled':
-                        return self._deny(409, f"already {jj.get('status')}")
-                    jj['status'] = 'cancelled'; jj['items'] = []
-                    _jobs_save(jd)
+                cur = db().execute(
+                    """UPDATE jobs SET status='cancelled', items='[]'
+                       WHERE id=? AND owner=? AND status='scheduled'""",
+                    (d.get('id'), self._who() or 'token'))
+                if cur.rowcount != 1:
+                    return self._deny(409, 'not cancellable — already fired or not yours')
                 return self._send({'ok': True})
             if u.path == '/api/relay':
                 return self._send(relay(d.get('raw'), d.get('chain'),

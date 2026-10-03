@@ -24,3 +24,8 @@ jobs.json
 
 # Session signing secret
 .session_secret
+
+# SQLite database
+wasabi.db
+wasabi.db-wal
+wasabi.db-shm
