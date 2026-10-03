@@ -1121,6 +1121,15 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
+        if u.path == '/login':
+            # always the login card: with a token in play the user is already
+            # "authenticated", so sending them to / would just bounce back
+            b = open(os.path.join(HERE, 'login.html'), 'rb').read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', str(len(b)))
+            self._secure_headers(); self.end_headers(); self.wfile.write(b); return
         if u.path.startswith('/auth/'):
             return self._auth_get(u, q)
         if not self._authed():

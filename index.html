@@ -82,6 +82,12 @@ h1 .mark{width:38px;height:38px;color:var(--acc);flex:none;transition:width .45s
 #acct a{color:var(--mut);text-decoration:none;border:1px solid var(--line);
   border-radius:7px;padding:5px 10px;background:#13161a}
 #acct a:hover{color:var(--fg);border-color:var(--acc)}
+#runbar{display:flex;align-items:center;gap:13px;margin:14px 0 0;font-family:var(--mono);
+  font-size:12px}
+#runbar a{color:var(--acc);text-decoration:none}
+#runbar a:hover{text-decoration:underline}
+#runbar span{color:#5d646e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hidden{display:none}
 /* sub-steps: one line per field as it lands */
 .slns{margin-bottom:4px}
 .sln{display:flex;align-items:baseline;gap:7px;font-size:12.5px;line-height:1.95;
@@ -188,6 +194,8 @@ table.st td:not(:first-child),table.st th:not(:first-child){text-align:right}
       </div>
     </div>
   </div>
+  <div id="runbar" class="hidden"><a href="#" id="newsearch">&larr; new search</a>
+    <span id="runwhat"></span></div>
   <div id="term"></div>
 </div>
 <script>
@@ -196,7 +204,7 @@ const esc=s=>String(s??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp
 const dt=t=>new Date(t*1000).toLocaleString();
 const j=async(u,o)=>{const r=await fetch(u,o);return r.json()};
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
-let C=null,D=null,P=null,tick=null;
+let C=null,D=null,P=null,BP=null,tick=null;
 
 function line(text){
   const el=document.createElement('div');
@@ -289,9 +297,26 @@ async function rows(host,items,delay=55){
   }
 }
 
-async function run(){
+function resetToHero(){
+  clearInterval(tick);
+  $('hero').classList.remove('ran');
+  $('runbar').classList.add('hidden');
+  $('term').innerHTML='';
+  C=D=P=BP=null;
+  $('go').disabled=false;
+  if(location.search) history.pushState({},'', location.pathname);
+}
+
+async function run(push=true){
+  const q=$('url').value.trim();
+  if(!q) return;
   $('go').disabled=true;
   $('hero').classList.add('ran');
+  // the run is addressable, so a refresh or a shared link rebuilds it instead
+  // of dropping you back on an empty landing page
+  if(push) history.pushState({c:q},'', '?c='+encodeURIComponent(q));
+  $('runbar').classList.remove('hidden');
+  $('runwhat').textContent=q;
   $('term').innerHTML='';
   C=D=P=null; clearInterval(tick);
   await wait(420);
@@ -530,7 +555,6 @@ async function checkElig(){
       free the allowance.</div>`;
 }
 
-let BP=null;
 function bindBatch(){
   $('bcheck').onclick=async()=>{
     $('bout').innerHTML='<span class="muted">reading wallets and checking allowances…</span>';
@@ -617,14 +641,23 @@ function bindMint(){
   };
 }
 
-$('go').onclick=run;
+$('go').onclick=()=>run();
 $('url').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
+$('newsearch').onclick=e=>{e.preventDefault();resetToHero();$('url').focus()};
+addEventListener('popstate',()=>{
+  const c=new URLSearchParams(location.search).get('c');
+  if(c){ $('url').value=c; run(false); } else { resetToHero(); }
+});
 (async()=>{
+  // restore a run from the URL, so refresh does not lose the screen
+  const c0=new URLSearchParams(location.search).get('c');
+  if(c0){ $('url').value=c0; run(false); }
   try{
     const me=await j('/auth/me');
     $('acct').innerHTML = me.email
       ? `<span>${esc(me.email)}</span><a href="/auth/logout">Sign out</a>`
-      : `<a href="/">Sign in</a>`;
+      : `<span title="authenticated by token, not a session">token session</span>`+
+        `<a href="/login">Sign in</a>`;
   }catch(e){}
   const k=await j('/api/key');
   $('keyst').innerHTML=k.have
