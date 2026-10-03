@@ -593,6 +593,22 @@ async function run(push=true){
       <button class="f fire" id="bsend">Mint</button>
     </div>
     <div id="bsout" style="margin-top:11px"></div>
+
+    <div id="fundbox" class="hidden" style="margin-top:20px;padding-top:15px;border-top:1px solid #1e232b">
+      <div class="lbl" style="margin-bottom:9px">top up gas
+        <i>— send from one wallet to the ones above</i></div>
+      <div class="row">
+        <button class="f" id="fConnect">Use connected wallet</button>
+        <button class="f" id="fKey">Use a private key</button>
+        <span class="muted" style="font-size:12px" id="fwho">no funding wallet chosen</span>
+      </div>
+      <div id="fkeybox" class="hidden" style="margin-top:9px">
+        <input id="fpk" class="f" type="password" style="width:100%;font-family:var(--mono);font-size:11.5px"
+               placeholder="private key of the wallet holding the gas" autocomplete="off">
+        <div class="row" style="margin-top:7px"><button class="f" id="fpkAdd">Use this</button></div>
+      </div>
+      <div id="fplan" style="margin-top:12px"></div>
+    </div>
     <div class="note">Signing happens in your browser. Only the finished signed
       transaction reaches this server, which sits <b>~19ms</b> from the sequencer
       instead of the ~264ms a typical connection costs. It cannot read your key.</div>
@@ -711,7 +727,7 @@ function bindBrowserSign(){
       await prov.send('eth_requestAccounts',[]);
       const signer=await prov.getSigner();
       addWallet(await signer.getAddress(), signer, 'extension');
-      out(''); renderWallets();
+      out(''); renderWallets(); planFunding();
     }catch(e){ out(`<span class="err">${esc(e.shortMessage||e.message||e)}</span>`) }
   };
 
@@ -729,10 +745,114 @@ function bindBrowserSign(){
     $('pk').value='';                        // never leave a key sitting in the DOM
     $('wkeybox').classList.add('hidden');
     out(added?'':'<span class="err">none of those keys were valid</span>');
-    renderWallets();
+    renderWallets(); planFunding();
   };
 
-  $('bq').onchange=renderWallets;
+  $('bq').onchange=()=>{renderWallets();planFunding()};
+
+  // ---- topping up gas -----------------------------------------------------
+  // One sender, many recipients: the transfers are signed here with
+  // consecutive nonces and relayed together, so they execute in order.
+  let FUNDER=null;
+  const fout=m=>{ if($('fplan')) $('fplan').innerHTML=m };
+
+  async function planFunding(){
+    if(!WALLETS.length||!D){ $('fundbox').classList.add('hidden'); return }
+    $('fundbox').classList.remove('hidden');
+    if(!FUNDER){ fout('<div class="note">Choose a wallet to send gas from.</div>'); return }
+    const rpc=new ethers.JsonRpcProvider(D.rpc);
+    const qty=+$('bq').value||1;
+    const fee=await rpc.getFeeData();
+    const gasPrice=fee.gasPrice||1n;
+    // a mint is ~125k gas; 3x covers price moves and a second attempt
+    const perMint=125000n*gasPrice*3n;
+    const price=BigInt(D.publicDrop?D.publicDrop.price:0)*BigInt(qty);
+    const need=perMint+price;
+    const rows=[]; let total=0n;
+    for(const x of WALLETS){
+      const bal=await rpc.getBalance(x.address);
+      const short=bal>=need?0n:need-bal;
+      if(short>0n) total+=short;
+      rows.push({a:x.address,bal,short});
+    }
+    const fbal=await rpc.getBalance(FUNDER.address);
+    const gasForSends=21000n*gasPrice*BigInt(rows.filter(r=>r.short>0n).length||1);
+    const enough=fbal>=total+gasForSends;
+    const E=v=>Number(ethers.formatEther(v)).toFixed(8);
+    fout(`<table class="st" style="max-width:720px">
+        <tr><th>wallet</th><th>has</th><th>needs</th><th>send</th></tr>
+        ${rows.map(r=>`<tr><td class="mono">${esc(r.a.slice(0,16))}…</td>
+          <td>${E(r.bal)}</td><td>${E(need)}</td>
+          <td class="${r.short>0n?'a':'ok'}">${r.short>0n?E(r.short):'—'}</td></tr>`).join('')}
+      </table>
+      <div class="row" style="margin-top:11px">
+        <span class="${enough?'ok':'err'}" style="font-size:12.5px">
+          total ${E(total)} ETH ${enough?'· funder has '+E(fbal):'· funder only has '+E(fbal)}</span>
+        <button class="f fire" id="fsend" ${total===0n||!enough?'disabled':''}
+          style="margin-left:auto">${total===0n?'all funded':'Send gas'}</button>
+      </div>
+      <div class="note">Each wallet is topped up to roughly three times what one mint
+        costs, plus the mint price if the drop is not free. Already-funded wallets are
+        skipped.</div>`);
+    if($('fsend')) $('fsend').onclick=()=>sendFunding(rows.filter(r=>r.short>0n));
+  }
+
+  async function sendFunding(targets){
+    if(!FUNDER||!targets.length) return;
+    const rpc=new ethers.JsonRpcProvider(D.rpc);
+    const fee=await rpc.getFeeData();
+    let nonce=await rpc.getTransactionCount(FUNDER.address,'pending');
+    const items=[], failed=[];
+    fout(`<span class="muted">signing ${targets.length} transfers…</span>`);
+    for(const t of targets){
+      try{
+        if(FUNDER.source==='extension'){
+          const sent=await FUNDER.signer.sendTransaction({to:t.a,value:t.short});
+          items.push({address:t.a,qty:0,hash:sent.hash,viaExt:true});
+        }else{
+          const raw=await FUNDER.signer.signTransaction({
+            to:t.a, value:t.short, nonce:nonce++, gasLimit:21000n,
+            gasPrice:fee.gasPrice, chainId:BigInt(D.chainId)});
+          items.push({raw,address:t.a,qty:0});
+        }
+      }catch(e){ failed.push(t.a); }
+    }
+    const relayable=items.filter(i=>i.raw);
+    if(relayable.length){
+      const r=await j('/api/relay/batch',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({items:relayable,chain:C.chain,label:'gas top-up'})});
+      if(r.error){ fout(`<span class="err">${esc(r.error)}</span>`); return }
+      fout(`<div class="verdict ${r.landed?'y':'n'}">${r.landed} of ${relayable.length} transfers sent</div>
+        <div class="note">${failed.length?failed.length+' could not be signed. ':''}
+          Re-checking balances…</div>`);
+    }else{
+      fout('<div class="verdict y">sent via your extension</div>');
+    }
+    setTimeout(()=>{renderWallets();planFunding()},3500);
+  }
+
+  $('fConnect').onclick=async()=>{
+    if(!window.ethereum){fout('<span class="err">no wallet extension found</span>');return}
+    const prov=new ethers.BrowserProvider(window.ethereum);
+    await prov.send('eth_requestAccounts',[]);
+    const signer=await prov.getSigner();
+    FUNDER={address:await signer.getAddress(), signer, source:'extension'};
+    $('fwho').innerHTML=`funding from <span class="mono">${esc(FUNDER.address.slice(0,16))}…</span>
+      <span class="muted">(extension — one confirmation per transfer)</span>`;
+    planFunding();
+  };
+  $('fKey').onclick=()=>{ $('fkeybox').classList.toggle('hidden'); $('fpk').focus(); };
+  $('fpkAdd').onclick=()=>{
+    const k=($('fpk').value.match(/0x[a-fA-F0-9]{64}/)||[])[0];
+    if(!k){fout('<span class="err">that is not a private key</span>');return}
+    try{
+      const wal=new ethers.Wallet(k,new ethers.JsonRpcProvider(D.rpc));
+      FUNDER={address:wal.address, signer:wal, source:'key'};
+      $('fpk').value=''; $('fkeybox').classList.add('hidden');
+      $('fwho').innerHTML=`funding from <span class="mono">${esc(FUNDER.address.slice(0,16))}…</span>`;
+      planFunding();
+    }catch(e){ fout('<span class="err">invalid key</span>') }
+  };
 
   $('bsend').onclick=async()=>{
     if(!WALLETS.length){ out('<span class="err">add a wallet first</span>'); return }
