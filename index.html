@@ -9,8 +9,13 @@
   --mut:#8d949f;--acc:#8ec63f;--ok:#5bbf84;--bad:#e0655f;--warn:#d9a441;
   --mono:ui-monospace,SFMono-Regular,Menlo,monospace}
 *{box-sizing:border-box}
+html,body{max-width:100%;overflow-x:hidden}
 body{margin:0;background:var(--bg);color:var(--fg);
   font:14px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
+/* A flex child will not shrink below its content unless min-width is reset,
+   which is what pushed long addresses and URLs past the viewport. */
+.ln,.sln,.row,.head,.top{min-width:0}
+.ln .t,.sln .v,.rcard .top span{min-width:0;overflow-wrap:anywhere}
 .wrap{max-width:1060px;margin:0 auto;padding:0 20px 80px}
 
 /* ---- hero: centred until a run starts, then it becomes the run header ---- */
@@ -61,7 +66,8 @@ h1 .mark{width:38px;height:38px;color:var(--acc);flex:none;transition:width .45s
 /* ---- terminal ---- */
 #term{font-family:var(--mono);font-size:12.5px;line-height:1.9;margin:18px 0 4px}
 .ln{margin-top:2px}
-.ln{display:flex;gap:9px;opacity:0;animation:fade .25s ease forwards}
+.ln{display:flex;gap:9px;opacity:0;animation:fade .25s ease forwards;
+  overflow-wrap:anywhere}
 .ln .p{color:var(--acc);flex:none}
 .ln .t{color:var(--mut)}
 .ln .t b{color:var(--fg);font-weight:600}
@@ -119,13 +125,27 @@ h1 .mark{width:38px;height:38px;color:var(--acc);flex:none;transition:width .45s
   .pitch{margin-top:26px}
 
   /* terminal output: let long hashes scroll instead of breaking the layout */
-  #term{font-size:11.5px;line-height:1.75}
-  .out{margin-left:4px;padding-left:11px}
-  .kv{grid-template-columns:104px 1fr;gap:3px 10px;font-size:11.5px}
-  .sln{font-size:11.5px}
-  .sln .v{max-width:52%}
+  #term{font-size:11.5px;line-height:1.7}
+  .out{margin-left:2px;padding-left:10px}
+  .kv{grid-template-columns:1fr;gap:1px 0;font-size:11.5px}
+  .kv div:nth-child(odd){margin-top:7px}
+  /* label above value: a dotted leader needs width that a phone does not have */
+  .sln{flex-direction:column;align-items:stretch;gap:0;line-height:1.6;margin-bottom:5px}
+  .sln .lead{display:none}
+  .sln .sp{display:none}
+  .sln .k:before{content:'> ';color:#4a515b}
+  .sln .v{max-width:100%;white-space:normal;overflow-wrap:anywhere;padding-left:13px;
+    text-overflow:clip}
   table.st{display:block;overflow-x:auto;white-space:nowrap}
-  .lane{grid-template-columns:52px 1fr 60px}
+  .lane{grid-template-columns:48px 1fr 56px;font-size:11px}
+  .head{flex-wrap:wrap}
+  .links{gap:14px}
+  .verdict{font-size:12.5px}
+  .note{font-size:11px}
+  #runbar{font-size:11.5px}
+  #runbar span{max-width:100%}
+  .rcard{padding:11px 12px}
+  .rcard .meta{overflow-wrap:anywhere}
   .stat{gap:4px 16px}
   .row{gap:7px}
   .row input[type=number]{width:70px}
@@ -172,8 +192,8 @@ h1 .mark{width:38px;height:38px;color:var(--acc);flex:none;transition:width .45s
 .sln .sp{color:#4a515b;flex:none}
 .sln .k{color:#6b727c;flex:none}
 .sln .lead{flex:1;border-bottom:1px dotted #22272f;transform:translateY(-3px);min-width:14px}
-.sln .v{color:var(--fg);flex:none;max-width:62%;overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap}
+.sln .v{color:var(--fg);flex:0 1 auto;min-width:0;max-width:62%;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
 .sln .v.pending{color:#4a515b}
 .sln .v.typing:after{content:'\2590';color:var(--acc);margin-left:1px;
   animation:blink .85s steps(2,end) infinite}
@@ -187,7 +207,7 @@ button.f{cursor:pointer}button.f:hover:not(:disabled){border-color:var(--acc)}
 button.f:disabled{opacity:.4;cursor:not-allowed}
 button.fire{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:650}
 .row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
-code,.mono{font-family:var(--mono);font-size:11.5px}
+code,.mono{font-family:var(--mono);font-size:11.5px;overflow-wrap:anywhere}
 .kv{display:grid;grid-template-columns:132px 1fr;gap:3px 14px;font-size:12.5px}
 .kv div:nth-child(odd){color:#6b727c}
 .head{display:flex;gap:14px;align-items:flex-start}
