@@ -859,6 +859,35 @@ def burst(rpcurl, raw, at, chain=None, lead=0.4, interval=0.025, window=4.0,
             'firstAt': attempts[0]['at'] if attempts else None}
 
 
+def relay_many(items, chain, at=None):
+    """Relay a batch of already-signed transactions, one per wallet.
+
+    Each item is {raw, address?} signed in the caller's browser. They are
+    different senders with different nonces, so all of them should land --
+    submission is parallel for throughput, not redundancy.
+    """
+    if not isinstance(items, list) or not items:
+        raise ValueError('expected a list of signed transactions')
+    if len(items) > 100:
+        raise ValueError('at most 100 transactions per batch')
+    if chain not in CHAINS:
+        raise ValueError(f'unknown chain {chain!r}')
+    rpcurl, _ = CHAINS[chain]
+    prepared = []
+    for it in items:
+        raw = (it or {}).get('raw')
+        if not isinstance(raw, str) or not re.fullmatch(r'0x[0-9a-fA-F]{64,}', raw or ''):
+            raise ValueError('every item needs a signed raw transaction as 0x-hex')
+        if len(raw) > 60000:
+            raise ValueError('transaction too large')
+        prepared.append({'address': (it.get('address') or '')[:42],
+                         'qty': it.get('qty'), 'raw': raw})
+    out = batch_fire(rpcurl, prepared, at, chain)
+    return {'landed': out['landed'], 'target': out['target'],
+            'results': [{k: v for k, v in r.items() if k != 'raw'}
+                        for r in out['results']]}
+
+
 def relay(raw, chain, at=None, lanes=2):
     """Submit an already-signed transaction. The server never sees a key.
 
@@ -1350,6 +1379,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 if not is_owner(self._who()) and not self._token_ok():
                     return self._deny(403, 'server-side signing is owner-only; sign in your browser instead')
                 return self._send(prepare(d['contract'], d['chain'], int(d['qty']), d['account']))
+            if u.path == '/api/relay/batch':
+                return self._send(relay_many(d.get('items'), d.get('chain'), d.get('at')))
             if u.path == '/api/relay':
                 return self._send(relay(d.get('raw'), d.get('chain'),
                                         d.get('at'), d.get('lanes', 2)))

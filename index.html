@@ -541,13 +541,13 @@ async function run(push=true){
       <div class="row">
         <button class="f" id="connect">Connect wallet</button>
         <span class="muted" style="font-size:12px">or</span>
-        <input id="pk" class="f" type="password" style="flex:1;min-width:260px"
-               placeholder="private key — kept in this tab, never sent anywhere"
-               autocomplete="off" spellcheck="false">
-        <label class="muted" style="font-size:12px">qty
+        <label class="muted" style="font-size:12px">qty each
           <input type="number" id="bq" value="10" min="1"></label>
         <button class="f fire" id="bsend">Sign &amp; relay</button>
       </div>
+      <textarea id="pk" class="f" spellcheck="false" autocomplete="off"
+        style="width:100%;min-height:76px;margin-top:9px;font-family:var(--mono);font-size:11.5px"
+        placeholder="your private keys — one per line. They stay in this tab and are never sent to the server."></textarea>
       <div id="bsout" style="margin-top:11px"></div>
       <div class="note">Signing happens here, in your browser. Only the finished signed
         transaction is posted to this server, which exists to put it in front of the
