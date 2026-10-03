@@ -974,18 +974,76 @@ def _run_job(jid):
             _jobs_save(d)
 
 
+_jobs_cache = {'mtime': -1, 'data': {}}
+
+
+def _jobs_cached():
+    """Re-read only when the file actually changed."""
+    try:
+        m = os.path.getmtime(JOBS_FILE)
+    except OSError:
+        return {}
+    if m != _jobs_cache['mtime']:
+        _jobs_cache['data'] = _jobs_load()
+        _jobs_cache['mtime'] = m
+    return _jobs_cache['data']
+
+
+def _recover_stuck():
+    """A job marked 'firing' when the process died never finishes on its own."""
+    with _joblock:
+        d = _jobs_load()
+        changed = False
+        for j in d.values():
+            if j.get('status') != 'firing':
+                continue
+            if j.get('at') and j['at'] > time.time():
+                j['status'] = 'scheduled'           # its moment has not passed
+            else:
+                j['status'] = 'failed'
+                j['results'] = [{'error': 'server restarted while firing'}]
+            changed = True
+        if changed:
+            _jobs_save(d)
+            _jobs_cache['mtime'] = -1
+
+
+LEAD = 0.35          # fire this early; the submit path's retry covers the rest
+
+
 def _scheduler():
-    """Fire anything whose moment has come. Slightly early, then the submit
-    path's own retry covers the boundary."""
+    """Sleep until the next job is due rather than polling blindly.
+
+    Polling every 250ms meant a job could fire up to 250ms late, which throws
+    away the 245ms the direct sequencer path exists to save. This sleeps to
+    just before the deadline and then spins the last few milliseconds, so the
+    submission lands when it was asked to. It still wakes periodically to
+    notice jobs queued after it went to sleep.
+    """
+    _recover_stuck()
     while True:
         try:
+            pending = [j for j in _jobs_cached().values() if j.get('status') == 'scheduled']
+            if not pending:
+                time.sleep(1.0)
+                continue
+            target = min(j['at'] for j in pending) - LEAD
+            wait = target - time.time()
+            if wait > 2.0:
+                time.sleep(min(wait - 1.0, 5.0))    # wake to pick up new arrivals
+                continue
+            if wait > 0:
+                time.sleep(max(0.0, wait - 0.02))
+                while time.time() < target:         # spin the last ~20ms
+                    time.sleep(0.0005)
             now = time.time()
-            for j in list(_jobs_load().values()):
-                if j.get('status') == 'scheduled' and j.get('at', 0) - 0.35 <= now:
+            for j in pending:
+                if j['at'] - LEAD <= now:
                     threading.Thread(target=_run_job, args=(j['id'],), daemon=True).start()
+            _jobs_cache['mtime'] = -1               # statuses just changed
+            time.sleep(0.05)
         except Exception:
-            pass
-        time.sleep(0.25)
+            time.sleep(1.0)
 
 
 threading.Thread(target=_scheduler, daemon=True).start()
