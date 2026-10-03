@@ -887,7 +887,15 @@ async function renderWallets(){
   if(!host) return;
   if(!WALLETS.length){ host.innerHTML=''; $('mintrow').classList.add('hidden'); return; }
   $('mintrow').classList.remove('hidden');
-  host.innerHTML=`<table class="st" style="max-width:760px">
+  const exts=WALLETS.filter(x=>x.source!=='key').length;
+  const warn = exts===WALLETS.length && WALLETS.length>1
+    ? `<div class="note err" style="margin-bottom:9px">All ${WALLETS.length} are extension
+         wallets, so each will prompt MetaMask separately and broadcast at its own RPC —
+         <b>none of them use the ~19ms relay</b>. That is ${WALLETS.length} confirmations
+         and no speed advantage. Adding them by private key instead signs them all here
+         with no prompts.</div>`
+    : '';
+  host.innerHTML=warn+`<table class="st" style="max-width:760px">
     <tr><th>wallet</th><th>added via</th><th>gas</th><th>minted</th><th>can take</th><th></th></tr>
     ${WALLETS.map((x,i)=>`<tr id="wr${i}"><td class="mono">${esc(x.address.slice(0,16))}…</td>
       <td class="muted">${x.source==='key'?'key · relayed':'extension · own broadcast'}</td>
@@ -959,8 +967,12 @@ function bindBrowserSign(){
         const signer=await prov.getSigner(a);
         if(addWallet(a, signer, 'extension')) added++;
       }
-      out(added?'':'<span class="muted">those accounts are already in the list — '
-        +'tick more in MetaMask to add others.</span>');
+      const dup=accounts.length-added;
+      out(`<span class="${added?'ok':'muted'}">${added} added</span>`+
+          `${dup?` <span class="muted">· ${dup} already in the list</span>`:''}`+
+          `<div class="note">MetaMask always opens that dialog with your connected
+            accounts already ticked — that is its own behaviour, not a saved choice
+            here. Tick further accounts in the same dialog to add them.</div>`);
       renderWallets(); planFunding();
     }catch(e){ out(`<span class="err">${esc(e.shortMessage||e.message||e)}</span>`) }
   };
